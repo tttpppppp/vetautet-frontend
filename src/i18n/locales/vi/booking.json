@@ -1,6 +1,6 @@
 {
     "ticket_details": {
-        "seo_title": "Vé Tàu {{train}}: {{from}} - {{to}} | Vé Tàu Việt Nam",
+        "seo_title": "Vé tàu {{train}}: {{from}} - {{to}} | Vé Tàu Việt Nam",
         "seo_desc": "Đặt vé tàu {{train}} từ {{from}} đi {{to}} ngày {{date}}. Giá vé ưu đãi, thủ tục nhanh chóng.",
         "steps": {
             "back": "Quay lại",
@@ -13,11 +13,17 @@
             "title": "Chọn toa tàu",
             "label": "Toa"
         },
+        "carriage": {
+            "select": "Chọn toa tàu",
+            "total": "toa",
+            "active": "Toa đang xem"
+        },
         "seats": {
-            "admin_cabin": "Phòng Điều Hành / Đầu Tàu",
-            "empty": "Trống",
-            "occupied": "Đã đặt",
-            "selected": "Đang chọn"
+            "admin_cabin": "Phòng điều hành / Đầu tàu",
+            "available": "Trống",
+            "occupied": "Đã bán",
+            "selected": "Đang chọn",
+            "held": "Đang giữ"
         },
         "summary": {
             "title": "Chi tiết đặt chỗ",
@@ -25,7 +31,7 @@
             "total": "Tổng cộng",
             "continue": "Tiếp tục đặt vé",
             "trip_summary": "Tóm tắt chuyến đi",
-            "ticket_count": "{{count}} Người",
+            "ticket_count": "{{count}} người",
             "total_price": "Tổng tiền",
             "continue_payment": "Tiếp tục thanh toán",
             "back_to_seats": "Quay về chọn chỗ"
@@ -60,7 +66,7 @@
         },
         "notes": {
             "title": "Lưu ý",
-            "text": "Tối đa 04 vé/khách. Thanh toán trong 15ph."
+            "text": "Tối đa 04 vé/khách. Thanh toán trong 15 phút."
         }
     }
 }

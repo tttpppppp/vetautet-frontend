@@ -13,6 +13,8 @@
         "train_se_tn": "SE/TN Trains",
         "train_tet": "Tet Trains",
         "schedule": "Schedule",
-        "support": "Support"
+        "support": "Support",
+        "profile": "My Profile",
+        "logout": "Logout"
     }
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -7,27 +7,126 @@ import {
     Shield, Bell, CreditCard, ChevronRight,
     LogOut, Settings, Award, History,
     Train, Ticket, Globe, Edit3,
-    CheckCircle2, ArrowRight, Zap
+    CheckCircle2, ArrowRight, Zap, Loader2, X, Save
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { authApi } from '../api/auth.api';
+import { uploadApi } from '../api/upload.api';
+import { useAuthStore } from '../store/useAuthStore';
+import { useNavigate } from 'react-router-dom';
 
 const Profile = () => {
     const { t } = useTranslation();
-    const [activeSection, setActiveSection] = useState('profile');
+    const navigate = useNavigate();
+    const queryClient = useQueryClient();
+    const { isAuthenticated, logout: storeLogout, setUser } = useAuthStore();
+    const fileInputRef = useRef(null);
 
-    const userInfo = {
-        name: 'Phạm Kỳ Anh',
-        email: 'anh.pk@gmail.com',
-        phone: '090 123 4567',
-        address: 'Hòa Xuân, Cẩm Lệ, Đà Nẵng',
-        avatar: 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?auto=format&fit=crop&q=80&w=400',
-        level: t('profile.level'),
-        points: 2450,
-        trips: 12,
-        joinDate: '10/2023'
+    const [activeSection, setActiveSection] = useState('profile');
+    const [isEditing, setIsEditing] = useState(false);
+    const [editForm, setEditForm] = useState({ name: '', phone: '', address: '', nationality: '' });
+
+    // Fetch user profile
+    const { data: userInfo, isLoading } = useQuery({
+        queryKey: ['profile'],
+        queryFn: authApi.getMe,
+        enabled: isAuthenticated,
+        onSuccess: (data) => {
+            setEditForm({
+                name: data.name || '',
+                phone: data.phone || '',
+                address: data.address || '',
+                nationality: data.nationality || '',
+            });
+        }
+    });
+
+    useEffect(() => {
+        if (userInfo) {
+            setUser(userInfo);
+        }
+    }, [setUser, userInfo]);
+
+    // Upload avatar mutation
+    const uploadMutation = useMutation({
+        mutationFn: (file) => uploadApi.uploadImage(file, 'avatars'),
+        onSuccess: async (res) => {
+            await authApi.updateProfile({ imageUrl: res.imageUrl });
+            queryClient.invalidateQueries({ queryKey: ['profile'] });
+        },
+    });
+
+    // Update profile mutation
+    const updateProfileMutation = useMutation({
+        mutationFn: (data) => authApi.updateProfile(data),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['profile'] });
+            setIsEditing(false);
+        },
+    });
+
+    // Logout handler
+    const handleLogout = async () => {
+        try {
+            await authApi.logout();
+        } catch (_) { /* ignore */ }
+        storeLogout();
+        navigate('/');
     };
+
+    const handleAvatarClick = () => fileInputRef.current?.click();
+
+    const handleFileChange = (e) => {
+        const file = e.target.files?.[0];
+        if (file) uploadMutation.mutate(file);
+    };
+
+    const handleEditStart = () => {
+        if (userInfo) {
+            setEditForm({
+                name: userInfo.name || '',
+                phone: userInfo.phone || '',
+                address: userInfo.address || '',
+                nationality: userInfo.nationality || '',
+            });
+        }
+        setIsEditing(true);
+    };
+
+    const handleSaveProfile = () => {
+        updateProfileMutation.mutate(editForm);
+    };
+
+    const getRankLabel = (rank) => {
+        const ranks = { BRONZE: 'Bronze', SILVER: 'Silver', GOLD: 'Gold', PLATINUM: 'Platinum', DIAMOND: 'Diamond' };
+        return ranks[rank] || rank || 'Member';
+    };
+
+    const formatJoinDate = (dateStr) => {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getFullYear()}`;
+    };
+
+    if (!isAuthenticated) {
+        navigate('/login');
+        return null;
+    }
+
+    if (isLoading) {
+        return (
+            <main className="min-h-screen bg-[#F8F9FB] flex flex-col">
+                <Header />
+                <div className="flex-grow flex items-center justify-center">
+                    <Train className="animate-spin text-tet-red" size={32} />
+                </div>
+                <Footer />
+            </main>
+        );
+    }
 
     const sidebarItems = [
         { id: 'profile', icon: User, label: t('profile.sidebar.profile'), desc: t('profile.sidebar.profile_desc') },
@@ -37,39 +136,17 @@ const Profile = () => {
         { id: 'payment', icon: CreditCard, label: t('profile.sidebar.payment'), desc: t('profile.sidebar.payment_desc') },
     ];
 
-    const orders = [
-        {
-            id: 'TET2026-X89J',
-            date: '25/01/2026',
-            train: 'SE1',
-            from: t('search.stations.hanoi'),
-            to: t('search.stations.saigon'),
-            departureTime: '21:30',
-            arrivalTime: '05:45 (+1)',
-            seats: ['T01-05', 'T01-06'],
-            total: '1.700.000đ',
-            status: 'completed',
-            isTet: true
-        },
-        {
-            id: 'TET2026-P42K',
-            date: '15/02/2026',
-            train: 'SE3',
-            from: t('search.stations.saigon'),
-            to: t('search.stations.danang'),
-            departureTime: '19:25',
-            arrivalTime: '11:45',
-            seats: ['T04-12'],
-            total: '850.000đ',
-            status: 'active',
-            isTet: false
-        }
-    ];
+    const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(userInfo?.name || 'U')}&background=D32F2F&color=fff&size=200&bold=true`;
+    const avatarUrl = userInfo?.imageUrl || defaultAvatar;
 
-    const statusConfig = {
-        active: { color: 'text-tet-red', bg: 'bg-red-50', label: t('orders.status.active') },
-        completed: { color: 'text-green-500', bg: 'bg-green-50', label: t('orders.status.completed') }
-    };
+    const profileFields = [
+        { label: t('profile.labels.fullname'), value: userInfo?.name, icon: User, color: 'text-tet-red', key: 'name' },
+        { label: t('profile.labels.email'), value: userInfo?.email, icon: Mail, color: 'text-blue-500' },
+        { label: t('profile.labels.phone'), value: userInfo?.phone || '—', icon: Phone, color: 'text-green-500', key: 'phone' },
+        { label: t('profile.labels.address'), value: userInfo?.address || '—', icon: MapPin, color: 'text-orange-500', key: 'address' },
+        { label: t('profile.labels.join_date'), value: formatJoinDate(userInfo?.createdAt), icon: History, color: 'text-purple-500' },
+        { label: t('profile.labels.nationality'), value: userInfo?.nationality || 'Vietnam', icon: Globe, color: 'text-cyan-500', key: 'nationality' },
+    ];
 
     return (
         <main className="min-h-screen bg-[#F8F9FB] flex flex-col selection:bg-tet-red selection:text-white">
@@ -79,21 +156,20 @@ const Profile = () => {
             </Helmet>
             <Header />
 
+            {/* Hidden file input for avatar upload */}
+            <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="image/*" className="hidden" />
+
             {/* Premium Header/Cover */}
             <div className="relative pt-24 h-32 md:h-48 overflow-hidden transition-all duration-500">
                 <div className="absolute inset-0 bg-gradient-to-br from-gray-900 via-red-950 to-black" />
                 <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]" />
                 <div className="absolute bottom-0 left-0 w-full h-16 md:h-24 bg-gradient-to-t from-[#F8F9FB] to-transparent" />
-
-                {/* Decorative Elements */}
                 <div className="absolute top-8 md:top-16 left-5 md:left-10 w-24 md:w-48 h-24 md:h-48 bg-tet-red/20 rounded-full blur-[60px] md:blur-[80px] animate-pulse" />
                 <div className="absolute bottom-8 md:bottom-16 right-5 md:right-10 w-32 md:w-64 h-32 md:h-64 bg-tet-yellow/10 rounded-full blur-[80px] md:blur-[100px] animate-pulse delay-700" />
             </div>
 
             <section className="-mt-4 md:-mt-16 pb-24 relative z-10">
                 <div className="max-w-7xl mx-auto px-4 md:px-12">
-
-                    {/* Main Container */}
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8">
 
                         {/* LEFT: Profile Overview Card */}
@@ -108,9 +184,15 @@ const Profile = () => {
                                 <div className="relative flex flex-col items-center text-center">
                                     <div className="relative mb-3">
                                         <div className="w-16 h-16 md:w-20 md:h-20 rounded-[1.5rem] md:rounded-[1.8rem] overflow-hidden border-[3px] border-white shadow-xl relative">
-                                            <img src={userInfo.avatar} className="w-full h-full object-cover" alt={userInfo.name} />
-                                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer">
-                                                <Camera className="text-white" size={14} />
+                                            <img src={avatarUrl} className="w-full h-full object-cover" alt={userInfo?.name} />
+                                            <div
+                                                onClick={handleAvatarClick}
+                                                className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer"
+                                            >
+                                                {uploadMutation.isPending
+                                                    ? <Loader2 className="text-white animate-spin" size={14} />
+                                                    : <Camera className="text-white" size={14} />
+                                                }
                                             </div>
                                         </div>
                                         <motion.div
@@ -122,27 +204,28 @@ const Profile = () => {
                                         </motion.div>
                                     </div>
 
-                                    <h2 className="text-base md:text-lg font-black text-gray-900 mb-0.5 tracking-tight">{userInfo.name}</h2>
+                                    <h2 className="text-base md:text-lg font-black text-gray-900 mb-0.5 tracking-tight">{userInfo?.name}</h2>
                                     <div className="flex items-center gap-1.5 mb-4">
                                         <Award size={10} className="text-tet-red" />
-                                        <span className="text-tet-red font-black text-[8px] md:text-[9px] uppercase tracking-[0.15em]">{userInfo.level}</span>
+                                        <span className="text-tet-red font-black text-[8px] md:text-[9px] uppercase tracking-[0.15em]">
+                                            {getRankLabel(userInfo?.membershipRank)}
+                                        </span>
                                     </div>
 
-                                    {/* Quick Stats Wrap */}
                                     <div className="grid grid-cols-2 gap-2 w-full pt-3 border-t border-gray-50">
                                         <div className="p-2 md:p-2.5 bg-gray-50/50 rounded-lg md:rounded-xl">
                                             <p className="text-[7px] md:text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">{t('profile.stats.points')}</p>
-                                            <p className="text-sm md:text-base font-black text-gray-900">{userInfo.points}</p>
+                                            <p className="text-sm md:text-base font-black text-gray-900">{userInfo?.rewardPoints || 0}</p>
                                         </div>
                                         <div className="p-2 md:p-2.5 bg-gray-50/50 rounded-lg md:rounded-xl">
                                             <p className="text-[7px] md:text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">{t('profile.stats.trips')}</p>
-                                            <p className="text-sm md:text-base font-black text-gray-900">{userInfo.trips}</p>
+                                            <p className="text-sm md:text-base font-black text-gray-900">{userInfo?.tripsCount || 0}</p>
                                         </div>
                                     </div>
                                 </div>
                             </motion.div>
 
-                            {/* Sidebar Menu - Tabs on Mobile */}
+                            {/* Sidebar Menu */}
                             <motion.div
                                 initial={{ opacity: 0, y: 20 }}
                                 animate={{ opacity: 1, y: 0 }}
@@ -178,7 +261,7 @@ const Profile = () => {
                                     ))}
 
                                     <div className="hidden lg:block pt-2 mt-2 border-t border-gray-50">
-                                        <button className="w-full flex items-center gap-3 p-3 rounded-xl text-red-500 font-black hover:bg-red-50 transition-all">
+                                        <button onClick={handleLogout} className="w-full flex items-center gap-3 p-3 rounded-xl text-red-500 font-black hover:bg-red-50 transition-all">
                                             <div className="w-8 h-8 bg-red-50 rounded-lg flex items-center justify-center shrink-0">
                                                 <LogOut size={16} />
                                             </div>
@@ -194,11 +277,8 @@ const Profile = () => {
 
                             {/* Feature Highlight Cards */}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <motion.div
-                                    initial={{ opacity: 0, x: 20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    className="bg-white rounded-[1.8rem] p-5 border border-white shadow-sm hover:shadow-lg transition-all relative overflow-hidden group cursor-pointer"
-                                >
+                                <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                                    className="bg-white rounded-[1.8rem] p-5 border border-white shadow-sm hover:shadow-lg transition-all relative overflow-hidden group cursor-pointer">
                                     <div className="absolute inset-0 bg-gradient-to-br from-tet-red to-red-600 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                                     <div className="relative z-10 flex items-center gap-4">
                                         <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center text-tet-red group-hover:bg-white/20 group-hover:text-white transition-all">
@@ -206,17 +286,13 @@ const Profile = () => {
                                         </div>
                                         <div>
                                             <h4 className="font-black text-gray-900 group-hover:text-white text-sm transition-colors">{t('profile.features.active_tickets')}</h4>
-                                            <p className="text-gray-400 group-hover:text-white/70 font-bold text-xs transition-colors">{t('profile.features.active_tickets_desc', { count: 2 })}</p>
+                                            <p className="text-gray-400 group-hover:text-white/70 font-bold text-xs transition-colors">{t('profile.features.active_tickets_desc', { count: userInfo?.tripsCount || 0 })}</p>
                                         </div>
                                     </div>
                                 </motion.div>
 
-                                <motion.div
-                                    initial={{ opacity: 0, x: 20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    transition={{ delay: 0.1 }}
-                                    className="bg-white rounded-[1.8rem] p-5 border border-white shadow-sm hover:shadow-lg transition-all relative overflow-hidden group cursor-pointer"
-                                >
+                                <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.1 }}
+                                    className="bg-white rounded-[1.8rem] p-5 border border-white shadow-sm hover:shadow-lg transition-all relative overflow-hidden group cursor-pointer">
                                     <div className="absolute inset-0 bg-gradient-to-br from-gray-900 to-black opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                                     <div className="relative z-10 flex items-center gap-4">
                                         <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-gray-900 group-hover:bg-white/20 group-hover:text-white transition-all">
@@ -224,7 +300,7 @@ const Profile = () => {
                                         </div>
                                         <div>
                                             <h4 className="font-black text-gray-900 group-hover:text-white text-sm transition-colors">{t('profile.features.membership')}</h4>
-                                            <p className="text-gray-400 group-hover:text-white/70 font-bold text-xs transition-colors">{t('profile.features.membership_desc')}</p>
+                                            <p className="text-gray-400 group-hover:text-white/70 font-bold text-xs transition-colors">{getRankLabel(userInfo?.membershipRank)} · {userInfo?.rewardPoints || 0} pts</p>
                                         </div>
                                     </div>
                                 </motion.div>
@@ -246,51 +322,75 @@ const Profile = () => {
                                                     <h3 className="text-2xl font-black text-gray-900 mb-0.5 tracking-tight">{t('profile.sections.identity.title')}</h3>
                                                     <p className="text-gray-400 font-bold text-xs max-w-sm">{t('profile.sections.identity.desc')}</p>
                                                 </div>
-                                                <button className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-tet-red transition-all active:scale-95 group">
-                                                    <Edit3 size={12} className="group-hover:rotate-12 transition-transform" />
-                                                    {t('profile.sections.identity.edit')}
-                                                </button>
+                                                {isEditing ? (
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => setIsEditing(false)} className="flex items-center gap-2 bg-gray-100 text-gray-600 px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-gray-200 transition-all active:scale-95">
+                                                            <X size={12} /> Hủy
+                                                        </button>
+                                                        <button
+                                                            onClick={handleSaveProfile}
+                                                            disabled={updateProfileMutation.isPending}
+                                                            className="flex items-center gap-2 bg-tet-red text-white px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-red-700 transition-all active:scale-95 disabled:opacity-50"
+                                                        >
+                                                            {updateProfileMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                                                            Lưu
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <button onClick={handleEditStart} className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-tet-red transition-all active:scale-95 group">
+                                                        <Edit3 size={12} className="group-hover:rotate-12 transition-transform" />
+                                                        {t('profile.sections.identity.edit')}
+                                                    </button>
+                                                )}
                                             </div>
 
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-y-6 gap-x-8">
-                                                {[
-                                                    { label: t('profile.labels.fullname'), value: userInfo.name, icon: User, color: 'text-tet-red' },
-                                                    { label: t('profile.labels.email'), value: userInfo.email, icon: Mail, color: 'text-blue-500' },
-                                                    { label: t('profile.labels.phone'), value: userInfo.phone, icon: Phone, color: 'text-green-500' },
-                                                    { label: t('profile.labels.address'), value: userInfo.address, icon: MapPin, color: 'text-orange-500' },
-                                                    { label: t('profile.labels.join_date'), value: userInfo.joinDate, icon: History, color: 'text-purple-500' },
-                                                    { label: t('profile.labels.nationality'), value: t('profile.labels.vietnam'), icon: Globe, color: 'text-cyan-500' }
-                                                ].map((info, idx) => (
+                                                {profileFields.map((info, idx) => (
                                                     <div key={idx} className="group space-y-1.5">
                                                         <div className="flex items-center gap-2">
                                                             <div className={cn("w-1 h-1 rounded-full", info.color.replace('text-', 'bg-'))} />
                                                             <label className="text-[8px] font-black text-gray-300 uppercase tracking-widest">{info.label}</label>
                                                         </div>
-                                                        <div className="text-sm font-black text-gray-900 flex items-center gap-2.5 pl-3">
-                                                            {info.value}
-                                                            <CheckCircle2 size={10} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                                                        </div>
+                                                        {isEditing && info.key ? (
+                                                            <input
+                                                                type="text"
+                                                                value={editForm[info.key] || ''}
+                                                                onChange={(e) => setEditForm(prev => ({ ...prev, [info.key]: e.target.value }))}
+                                                                className="w-full text-sm font-bold text-gray-900 pl-3 py-1.5 border border-gray-200 rounded-lg focus:border-tet-red focus:ring-1 focus:ring-tet-red/20 outline-none transition-all"
+                                                            />
+                                                        ) : (
+                                                            <div className="text-sm font-black text-gray-900 flex items-center gap-2.5 pl-3">
+                                                                {info.value}
+                                                                <CheckCircle2 size={10} className="text-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>
 
-                                            {/* Advanced Status */}
+                                            {/* Verification Status */}
                                             <div className="p-5 rounded-[1.5rem] bg-gradient-to-br from-gray-50 to-white border border-gray-100 flex flex-col md:flex-row items-center justify-between gap-4 hover:shadow-md transition-shadow">
                                                 <div className="flex items-center gap-4">
                                                     <div className="relative">
                                                         <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-tet-red shadow-lg border border-red-50">
                                                             <Zap size={24} fill="currentColor" />
                                                         </div>
-                                                        <div className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-green-500 rounded-full border-[2px] border-white" />
+                                                        {userInfo?.isIdentityVerified && (
+                                                            <div className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-green-500 rounded-full border-[2px] border-white" />
+                                                        )}
                                                     </div>
                                                     <div>
                                                         <h4 className="text-lg font-black text-gray-900 mb-0.5 tracking-tight">{t('profile.verification.title')}</h4>
-                                                        <p className="text-gray-400 font-bold max-w-xs text-[10px] leading-relaxed">{t('profile.verification.desc')}</p>
+                                                        <p className="text-gray-400 font-bold max-w-xs text-[10px] leading-relaxed">
+                                                            {userInfo?.isIdentityVerified ? 'Tài khoản đã xác minh danh tính' : t('profile.verification.desc')}
+                                                        </p>
                                                     </div>
                                                 </div>
-                                                <button className="whitespace-nowrap bg-white text-gray-900 border-2 border-gray-900 px-5 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest hover:bg-gray-900 hover:text-white transition-all active:scale-95">
-                                                    {t('profile.verification.cta')}
-                                                </button>
+                                                {!userInfo?.isIdentityVerified && (
+                                                    <button className="whitespace-nowrap bg-white text-gray-900 border-2 border-gray-900 px-5 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest hover:bg-gray-900 hover:text-white transition-all active:scale-95">
+                                                        {t('profile.verification.cta')}
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                     )}
@@ -303,46 +403,11 @@ const Profile = () => {
                                                     <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">{t('profile.sections.orders.desc')}</p>
                                                 </div>
                                             </div>
-
-                                            <div className="space-y-4">
-                                                {orders.map((order, idx) => {
-                                                    const Config = statusConfig[order.status];
-                                                    return (
-                                                        <motion.div
-                                                            key={order.id}
-                                                            initial={{ opacity: 0, x: 20 }}
-                                                            animate={{ opacity: 1, x: 0 }}
-                                                            transition={{ delay: idx * 0.1 }}
-                                                            className="p-5 bg-gray-50 rounded-[1.8rem] border border-gray-100 hover:bg-white hover:shadow-xl transition-all group"
-                                                        >
-                                                            <div className="flex flex-col md:flex-row items-center gap-6">
-                                                                <div className="w-11 h-11 bg-white rounded-2xl flex items-center justify-center text-tet-red shadow-sm shrink-0">
-                                                                    <Train size={20} />
-                                                                </div>
-                                                                <div className="flex-grow">
-                                                                    <div className="flex items-center gap-3 mb-1">
-                                                                        <span className="font-black text-gray-900 text-base uppercase">{order.train}</span>
-                                                                        <span className={cn("px-2 py-0.5 rounded-full text-[7px] font-black uppercase tracking-widest", Config.bg, Config.color)}>
-                                                                            {Config.label}
-                                                                        </span>
-                                                                    </div>
-                                                                    <div className="flex items-center gap-2 font-bold text-gray-600 text-sm">
-                                                                        <span>{order.from}</span>
-                                                                        <ArrowRight size={12} className="text-gray-300" />
-                                                                        <span>{order.to}</span>
-                                                                    </div>
-                                                                </div>
-                                                                <div className="text-right shrink-0">
-                                                                    <p className="font-black text-gray-900 text-sm">{order.date}</p>
-                                                                    <p className="text-[11px] font-bold text-gray-400">{t('orders.seat')}: {order.seats.join(', ')}</p>
-                                                                </div>
-                                                                <button className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-gray-900 hover:bg-black hover:text-white transition-all shadow-sm group-hover:scale-105 active:scale-95">
-                                                                    <ChevronRight size={20} />
-                                                                </button>
-                                                            </div>
-                                                        </motion.div>
-                                                    );
-                                                })}
+                                            <div className="flex flex-col items-center justify-center py-12 text-center">
+                                                <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center text-gray-200 mb-4">
+                                                    <Ticket size={32} />
+                                                </div>
+                                                <p className="text-gray-400 font-bold text-sm">Đang phát triển tính năng này</p>
                                             </div>
                                         </div>
                                     )}

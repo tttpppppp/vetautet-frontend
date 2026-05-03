@@ -1,67 +1,97 @@
 import React from 'react';
-import { Gift, Zap, Smartphone, ArrowRight } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { ArrowRight, Clock3, MapPin, Train } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { tripApi } from '../api/trip.api';
+
+const formatPrice = (price) => (price ?? 0).toLocaleString('vi-VN') + 'd';
+
+const formatDateTime = (value) => {
+    if (!value) return '--';
+    const date = new Date(value);
+    return `${date.toLocaleDateString('vi-VN')} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+};
 
 const PromotionSection = () => {
-    const { t } = useTranslation();
+    const { data: routes = [], isLoading } = useQuery({
+        queryKey: ['homepage-popular-routes'],
+        queryFn: () => tripApi.getPopularRoutes(6),
+        staleTime: 60_000,
+    });
 
     return (
-        <section className="py-24 bg-white overflow-hidden relative">
-            {/* Decorative Background Pattern */}
-            <div className="absolute top-0 right-0 w-1/3 h-full bg-red-50/50 clip-path-tet -z-10" />
-
-            <div className="max-w-7xl mx-auto px-4 md:px-12">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 md:gap-12 items-center">
-
-                    {/* Promotion Banner 1 */}
-                    <div className="relative group lg:grayscale lg:hover:grayscale-0 transition-all duration-700">
-                        <div className="absolute inset-0 bg-gradient-to-br from-tet-red to-red-900 rounded-[2rem] md:rounded-[3rem] transform rotate-1 group-hover:rotate-0 transition-transform duration-500 shadow-2xl shadow-red-500/20" />
-                        <div className="relative bg-white/10 backdrop-blur-xl border border-white/20 p-8 md:p-14 rounded-[2rem] md:rounded-[3rem] h-full flex flex-col justify-center min-h-[320px] md:min-h-[400px]">
-                            <div className="w-12 h-12 md:w-16 md:h-16 bg-tet-yellow rounded-xl md:rounded-2xl flex items-center justify-center mb-6 md:mb-8 shadow-lg shadow-tet-yellow/30">
-                                <Gift className="text-red-900" size={24} md:size={32} />
-                            </div>
-                            <h3 className="text-2xl md:text-4xl font-black text-white mb-3 md:mb-4 leading-tight">
-                                {t('promotions.title_1')} <br /> <span className="text-tet-yellow italic font-black">{t('promotions.highlight_1')}</span>
-                            </h3>
-                            <p className="text-red-50 mb-6 md:mb-8 text-sm md:text-lg font-medium opacity-80 max-w-sm">
-                                {t('promotions.desc_1')}
-                            </p>
-                            <button className="bg-white text-tet-red px-6 py-3 md:px-8 md:py-4 rounded-xl md:rounded-2xl font-bold flex items-center gap-2 w-full sm:w-fit justify-center hover:bg-tet-yellow hover:text-red-900 transition-all transform hover:translate-x-2">
-                                {t('promotions.cta_1')} <ArrowRight size={18} />
-                            </button>
-                        </div>
+        <section className="py-24 bg-gray-50/50">
+            <div className="max-w-7xl mx-auto px-6 md:px-12">
+                <div className="max-w-2xl mb-12">
+                    <div className="flex items-center gap-2 mb-3">
+                        <span className="h-1 w-8 bg-tet-red rounded-full"></span>
+                        <span className="text-tet-red font-black text-[10px] uppercase tracking-[0.2em]">Tuyến nổi bật</span>
                     </div>
+                    <h2 className="text-3xl md:text-5xl font-black text-gray-900 mb-4 leading-tight">
+                        Tuyến tàu <span className="text-tet-red">được tìm nhiều</span>
+                    </h2>
+                    <p className="text-gray-500 font-medium max-w-lg">
+                        Các hành trình có nhiều lựa chọn chuyến nhất, kèm chỗ trống và giờ khởi hành gần nhất.
+                    </p>
+                </div>
 
-                    {/* Promotion Banner 2 & Info */}
-                    <div className="space-y-6 md:space-y-8">
-                        <div className="bg-gradient-to-r from-tet-yellow to-[#FFD54F] p-8 md:p-12 rounded-[2rem] md:rounded-[3rem] shadow-xl shadow-tet-yellow/20 relative overflow-hidden group">
-                            <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-white/20 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-1000" />
-                            <div className="relative z-10 flex items-center justify-between">
-                                <div>
-                                    <div className="inline-flex items-center gap-2 bg-red-900/10 px-3 py-1 rounded-full text-red-900 text-[10px] md:text-xs font-black uppercase tracking-wider mb-4">
-                                        <Zap size={14} /> {t('promotions.flash_sale')}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    {(isLoading ? Array.from({ length: 6 }) : routes).map((route, index) => (
+                        <div key={isLoading ? index : `${route.departureStationId}-${route.arrivalStationId}`} className="bg-white rounded-3xl border border-gray-100 p-6 hover:shadow-2xl hover:shadow-red-500/10 transition-all duration-500">
+                            {isLoading ? (
+                                <div className="space-y-4 animate-pulse">
+                                    <div className="h-12 bg-gray-100 rounded-2xl" />
+                                    <div className="h-8 bg-gray-100 rounded-xl" />
+                                    <div className="h-20 bg-gray-100 rounded-xl" />
+                                </div>
+                            ) : (
+                                <div className="flex flex-col h-full">
+                                    <div className="flex justify-between items-start mb-5">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-12 h-12 bg-red-50 text-tet-red rounded-2xl flex items-center justify-center shadow-inner">
+                                                <Train size={22} />
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-gray-900">{route.departureStation}</h3>
+                                                <p className="text-xs text-gray-500 font-medium">to {route.arrivalStation}</p>
+                                            </div>
+                                        </div>
+                                        <div className="text-right">
+                                            <span className="text-xl font-black text-tet-red">
+                                                {formatPrice(route.minPrice)}
+                                            </span>
+                                        </div>
                                     </div>
-                                    <h4 className="text-xl md:text-2xl font-extrabold text-red-900 mb-2">{t('promotions.title_2')}</h4>
-                                    <p className="text-red-800/70 font-bold text-sm md:text-base">{t('promotions.desc_2')}</p>
-                                </div>
-                                <div className="hidden sm:block">
-                                    <Smartphone size={80} className="text-red-900/10" />
-                                </div>
-                            </div>
-                        </div>
 
-                        <div className="grid grid-cols-2 gap-4 md:gap-6">
-                            <div className="bg-gray-50 p-6 md:p-8 rounded-[1.5rem] md:rounded-[2.5rem] border border-gray-100 hover:bg-red-50 hover:border-red-100 transition-colors group">
-                                <div className="text-tet-red font-black text-2xl md:text-4xl mb-2 md:mb-3 group-hover:scale-110 transition-transform origin-left">{t('promotions.stats_1_val')}</div>
-                                <p className="text-gray-500 font-bold text-[10px] md:text-sm uppercase tracking-wider whitespace-pre-line">{t('promotions.stats_1_label')}</p>
-                            </div>
-                            <div className="bg-gray-50 p-6 md:p-8 rounded-[1.5rem] md:rounded-[2.5rem] border border-gray-100 hover:bg-yellow-50 hover:border-yellow-100 transition-colors group">
-                                <div className="text-tet-yellow font-black text-2xl md:text-4xl mb-2 md:mb-3 group-hover:scale-110 transition-transform origin-left">{t('promotions.stats_2_val')}</div>
-                                <p className="text-gray-500 font-bold text-[10px] md:text-sm uppercase tracking-wider whitespace-pre-line">{t('promotions.stats_2_label')}</p>
-                            </div>
-                        </div>
-                    </div>
+                                    <div className="grid grid-cols-2 gap-4 mb-6">
+                                        <div className="bg-gray-50 rounded-2xl p-4">
+                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Trips</p>
+                                            <p className="text-2xl font-black text-gray-900">{route.tripsCount}</p>
+                                        </div>
+                                        <div className="bg-gray-50 rounded-2xl p-4">
+                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Seats</p>
+                                            <p className="text-2xl font-black text-gray-900">{route.availableSeats}</p>
+                                        </div>
+                                    </div>
 
+                                    <div className="mt-auto border-t border-gray-100 pt-5 flex items-center justify-between gap-3">
+                                        <div className="text-[11px] font-bold text-gray-700">
+                                            <div className="inline-flex items-center gap-1.5">
+                                                <Clock3 size={14} className="text-tet-red" />
+                                                {formatDateTime(route.nextDepartureTime)}
+                                            </div>
+                                            <div className="mt-2 inline-flex items-center gap-1.5 text-gray-500 uppercase tracking-wider text-[10px]">
+                                                <MapPin size={12} />
+                                                {(route.trainCategories || []).join(', ') || 'Route'}
+                                            </div>
+                                        </div>
+                                        <button type="button" className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all flex items-center gap-1 shadow-lg shadow-gray-200 shrink-0">
+                                            Tìm vé <ArrowRight size={14} />
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ))}
                 </div>
             </div>
         </section>

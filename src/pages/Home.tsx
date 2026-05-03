@@ -1,16 +1,16 @@
 import React from 'react';
 import Header from '@/components/Header';
 import HeroSection from '@/components/HeroSection';
-import TicketList from '@/components/TicketList';
+import TicketList from '@/components/TicketList.tsx';
 import ReasonsToBookSection from '@/components/ReasonsToBookSection';
 import DestinationsSection from '@/components/DestinationsSection';
 import PromotionSection from '@/components/PromotionSection';
+import UpcomingDeparturesSection from '@/components/UpcomingDeparturesSection';
 import Footer from '@/components/Footer';
 import { useTranslation } from 'react-i18next';
-
 import { Helmet } from 'react-helmet-async';
 
-const Home = () => {
+const Home: React.FC = () => {
     const { t } = useTranslation();
 
     return (
@@ -31,11 +31,14 @@ const Home = () => {
             {/* Explore Destinations */}
             <DestinationsSection />
 
+            {/* Popular Routes */}
+            <PromotionSection />
+
+            {/* Upcoming Departures */}
+            <UpcomingDeparturesSection />
+
             {/* Reasons to Book */}
             <ReasonsToBookSection />
-
-            {/* Promotions & Stats */}
-            <PromotionSection />
 
             {/* Call to Action Section */}
             <section className="py-20 bg-tet-red relative overflow-hidden">

@@ -13,11 +13,17 @@
             "title": "Select Carriage",
             "label": "T"
         },
+        "carriage": {
+            "select": "Select Carriage",
+            "total": "carriages",
+            "active": "Current carriage"
+        },
         "seats": {
             "admin_cabin": "Admin Cabin / Locomotive",
-            "empty": "Empty",
-            "occupied": "Booked",
-            "selected": "Selected"
+            "available": "Available",
+            "occupied": "Occupied",
+            "selected": "Selected",
+            "held": "Held"
         },
         "summary": {
             "title": "Booking Details",

@@ -13,6 +13,8 @@
         "train_se_tn": "Vé Tàu SE/TN",
         "train_tet": "Vé Tàu Tết",
         "schedule": "Lịch trình",
-        "support": "Hỗ trợ"
+        "support": "Hỗ trợ",
+        "profile": "Trang cá nhân",
+        "logout": "Đăng xuất"
     }
 }
