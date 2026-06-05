@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MapPin, Calendar as CalendarIcon, Users, Search, ArrowRightLeft, ChevronDown, Check } from 'lucide-react';
+import { MapPin, Calendar as CalendarIcon, Users, Search, ArrowRightLeft, ChevronDown, Check, Ticket } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -13,6 +13,23 @@ const POPULAR_ROUTE_KEYS = [
     ['saigon', 'danang'],
     ['hanoi', 'vinh'],
 ];
+
+const toScheduleTrainType = (category) => {
+    if (category === 'HIGH_QUALITY') return 'CLC';
+    return category;
+};
+
+const toSearchCategory = (trainType) => {
+    if (trainType === 'CLC') return 'HIGH_QUALITY';
+    return trainType;
+};
+
+const getNextDateValue = (value) => {
+    const baseDate = value ? new Date(value) : new Date();
+    if (Number.isNaN(baseDate.getTime())) return '';
+    baseDate.setDate(baseDate.getDate() + 1);
+    return baseDate.toISOString().slice(0, 10);
+};
 
 const CustomSelect = ({ value, onChange, options, placeholder, icon: Icon, label, variant = 'dark' }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -100,6 +117,8 @@ const SearchForm = ({ variant = 'dark' }) => {
     const [from, setFrom] = useState('');
     const [to, setTo] = useState('');
     const [date, setDate] = useState('');
+    const [returnDate, setReturnDate] = useState('');
+    const [ticketType, setTicketType] = useState('one-way');
     const [passengers, setPassengers] = useState(1);
 
     const { data: stations = [] } = useQuery({
@@ -127,12 +146,15 @@ const SearchForm = ({ variant = 'dark' }) => {
     const toOptions = stations.map((station) => station.name);
 
     useEffect(() => {
-        if (location.pathname !== '/search') return;
+        if (!['/search', '/schedules'].includes(location.pathname)) return;
 
         setFrom(searchParams.get('departure') || '');
         setTo(searchParams.get('arrival') || '');
         setDate(searchParams.get('date') || '');
-        setActiveQuickFilter(searchParams.get('trainCategory') || 'ALL');
+        setReturnDate(searchParams.get('returnDate') || '');
+        setTicketType(searchParams.get('ticketType') || 'one-way');
+        setPassengers(Number(searchParams.get('passengers') || 1));
+        setActiveQuickFilter(toSearchCategory(searchParams.get('trainType') || searchParams.get('trainCategory') || 'ALL'));
     }, [location.pathname, searchParams]);
 
     const swapStations = () => {
@@ -146,11 +168,17 @@ const SearchForm = ({ variant = 'dark' }) => {
         if (from) params.set('departure', from);
         if (to) params.set('arrival', to);
         if (date) params.set('date', date);
+        if (ticketType === 'round-trip') {
+            params.set('ticketType', 'round-trip');
+            if (returnDate) params.set('returnDate', returnDate);
+        }
+        if (passengers > 1) params.set('passengers', String(passengers));
         if (activeQuickFilter && activeQuickFilter !== 'ALL') {
-            params.set('trainCategory', activeQuickFilter);
+            params.set('trainType', toScheduleTrainType(activeQuickFilter));
         }
 
-        navigate(`/search?${params.toString()}`);
+        const queryString = params.toString();
+        navigate(`/schedules${queryString ? `?${queryString}` : ''}`);
     };
 
     const popularRoutes = POPULAR_ROUTE_KEYS.map(([fromKey, toKey]) => ({
@@ -187,8 +215,45 @@ const SearchForm = ({ variant = 'dark' }) => {
                     ))}
                 </div>
 
+                <div className="mb-3 sm:mb-4 flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                    <span className={cn("text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 px-1 drop-shadow-sm", variant === 'dark' ? "text-white/90" : "text-gray-500")}>
+                        <Ticket size={11} className={variant === 'dark' ? "text-tet-yellow" : "text-tet-red"} />
+                        {t('search.ticket_type_label')}
+                    </span>
+                    <div className={cn("inline-flex rounded-full p-1 border backdrop-blur-sm", variant === 'dark' ? "bg-white/10 border-white/25" : "bg-gray-50 border-gray-200")}>
+                        {[
+                            { value: 'one-way', label: t('search.one_way') },
+                            { value: 'round-trip', label: t('search.round_trip') },
+                        ].map((option) => (
+                            <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => {
+                                    setTicketType(option.value);
+                                    if (option.value === 'round-trip' && !returnDate) {
+                                        setReturnDate(getNextDateValue(date));
+                                    }
+                                    if (option.value === 'one-way') {
+                                        setReturnDate('');
+                                    }
+                                }}
+                                className={cn(
+                                    "rounded-full px-4 py-1.5 text-xs font-black transition-all",
+                                    ticketType === option.value
+                                        ? "bg-tet-red text-white shadow-md"
+                                        : variant === 'dark'
+                                            ? "text-white/85 hover:bg-white/15"
+                                            : "text-gray-500 hover:bg-white"
+                                )}
+                            >
+                                {option.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5 sm:gap-3 md:gap-4 items-end">
-                    <div className="sm:col-span-2 lg:col-span-7 relative flex flex-col sm:flex-row items-end gap-5 sm:gap-3 md:gap-4">
+                    <div className={cn("sm:col-span-2 relative flex flex-col sm:flex-row items-end gap-5 sm:gap-3 md:gap-4", ticketType === 'round-trip' ? "lg:col-span-5" : "lg:col-span-7")}>
                         <div className="w-full sm:flex-1 relative z-10">
                             <CustomSelect
                                 label={t('search.from_label')}
@@ -243,11 +308,39 @@ const SearchForm = ({ variant = 'dark' }) => {
                                         : "bg-white border border-gray-200 focus:border-tet-red focus:ring-2 focus:ring-red-100 group-hover:border-gray-300 shadow-sm"
                                 )}
                                 value={date}
-                                onChange={(event) => setDate(event.target.value)}
+                                onChange={(event) => {
+                                    setDate(event.target.value);
+                                    if (ticketType === 'round-trip' && !returnDate) {
+                                        setReturnDate(getNextDateValue(event.target.value));
+                                    }
+                                }}
                             />
                             <CalendarIcon size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 group-hover:text-tet-red transition-colors pointer-events-none" />
                         </div>
                     </div>
+
+                    {ticketType === 'round-trip' && (
+                        <div className="sm:col-span-1 lg:col-span-2 space-y-1">
+                            <label className={cn("text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 px-1 drop-shadow-sm", variant === 'dark' ? "text-white/90" : "text-gray-500")}>
+                                <CalendarIcon size={11} className={variant === 'dark' ? "text-tet-yellow" : "text-tet-red"} /> {t('search.return_date_label')}
+                            </label>
+                            <div className="relative group">
+                                <input
+                                    type="date"
+                                    min={date || undefined}
+                                    className={cn(
+                                        "w-full rounded-lg py-2 px-3 outline-none font-bold text-sm text-gray-900 transition-all cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-0",
+                                        variant === 'dark'
+                                            ? "bg-white/90 backdrop-blur-sm border border-white/50 focus:border-white focus:ring-2 focus:ring-white/30 group-hover:border-white"
+                                            : "bg-white border border-gray-200 focus:border-tet-red focus:ring-2 focus:ring-red-100 group-hover:border-gray-300 shadow-sm"
+                                    )}
+                                    value={returnDate}
+                                    onChange={(event) => setReturnDate(event.target.value)}
+                                />
+                                <CalendarIcon size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 group-hover:text-tet-red transition-colors pointer-events-none" />
+                            </div>
+                        </div>
+                    )}
 
                     <div className="sm:col-span-1 lg:col-span-1 space-y-1">
                         <label className={cn("text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 px-1 drop-shadow-sm", variant === 'dark' ? "text-white/90" : "text-gray-500")}>
@@ -272,9 +365,15 @@ const SearchForm = ({ variant = 'dark' }) => {
                         <button
                             type="button"
                             onClick={handleSearch}
-                            className="w-full h-10 lg:h-[38px] bg-tet-yellow hover:bg-[#FFB300] text-red-900 font-black rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-tet-yellow/20 transition-all transform hover:scale-[1.02] active:scale-[0.98] text-sm uppercase tracking-tight"
+                            className="group relative w-full h-12 lg:h-[46px] overflow-hidden rounded-xl bg-gradient-to-r from-tet-yellow via-[#FFC533] to-[#FF9F1C] px-5 text-[#7A1A12] shadow-[0_14px_32px_rgba(255,193,7,0.28)] ring-1 ring-white/40 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_18px_42px_rgba(255,193,7,0.38)] active:translate-y-0 active:scale-[0.98]"
                         >
-                            <Search size={16} className="stroke-[3]" /> {t('search.cta')}
+                            <span className="absolute inset-y-0 left-0 w-1/3 bg-white/30 blur-2xl transition-transform duration-500 group-hover:translate-x-[220%]" />
+                            <span className="relative flex items-center justify-center gap-2.5 text-sm font-black uppercase tracking-wide">
+                                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-red-900/12 ring-1 ring-red-900/10 transition-colors group-hover:bg-red-900/18">
+                                    <Search size={16} className="stroke-[3]" />
+                                </span>
+                                {t('search.cta')}
+                            </span>
                         </button>
                     </div>
                 </div>

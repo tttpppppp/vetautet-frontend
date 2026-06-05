@@ -27,6 +27,7 @@ const Header = () => {
     const notificationRef = useRef(null);
 
     const { user, isAuthenticated, logout, fetchUser } = useAuthStore();
+    const canOpenAdmin = user?.roles?.some((role) => String(role).toUpperCase() === 'ADMIN');
     const canVerifyTickets = user?.roles?.some((role) => ['STAFF', 'ADMIN'].includes(String(role).toUpperCase()));
 
     const userDisplayName = user?.name || user?.email?.split('@')[0] || 'Tài khoản';
@@ -171,6 +172,7 @@ const Header = () => {
         { name: t('header.explore'), href: '/explore' },
         { name: t('header.contact'), href: '#' },
         { name: t('header.my_bookings'), href: '/orders' },
+        ...(canOpenAdmin ? [{ name: 'Admin', href: '/admin', icon: <LayoutDashboard size={16} /> }] : []),
         ...(canVerifyTickets ? [{ name: 'Quét QR', href: '/staff/verify-qr', icon: <ScanLine size={16} /> }] : []),
     ];
 
@@ -179,6 +181,7 @@ const Header = () => {
         { name: t('header.train_tet'), icon: <TrainFront size={18} className="text-tet-red" />, href: '#' },
         { name: t('header.schedule'), icon: <Bus size={18} />, href: '/schedules' },
         { name: t('header.promotions'), icon: <Ticket size={18} />, href: '/promotions' },
+        ...(canOpenAdmin ? [{ name: 'Admin', icon: <LayoutDashboard size={18} />, href: '/admin' }] : []),
         ...(canVerifyTickets ? [{ name: 'Quét QR', icon: <ScanLine size={18} />, href: '/staff/verify-qr' }] : []),
         { name: t('header.support'), icon: <MoreHorizontal size={18} />, href: '#' },
     ];

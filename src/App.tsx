@@ -19,6 +19,7 @@ const Schedules = lazy(() => import('./pages/Schedules.tsx'))
 const Promotions = lazy(() => import('./pages/Promotions.tsx'))
 const PaymentReturn = lazy(() => import('./pages/PaymentReturn.tsx'))
 const TicketQrVerify = lazy(() => import('./pages/TicketQrVerify.tsx'))
+const Admin = lazy(() => import('./pages/Admin.tsx'))
 
 const PageLoader: React.FC = () => (
   <div className="fixed inset-0 bg-white/70 backdrop-blur-xl z-[9999] flex flex-col items-center justify-center overflow-hidden">
@@ -64,6 +65,7 @@ function App() {
               <Route path="/payment/vnpay-return" element={<PaymentReturn provider="vnpay" />} />
               <Route path="/staff/verify-qr" element={<TicketQrVerify />} />
               <Route path="/admin/verify-qr" element={<TicketQrVerify />} />
+              <Route path="/admin" element={<Admin />} />
             </Routes>
           </div>
         </Suspense>

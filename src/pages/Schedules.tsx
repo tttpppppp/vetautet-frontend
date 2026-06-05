@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 import { cn } from '@/lib/utils';
-import { useQuery } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
     AlertCircle,
@@ -29,7 +29,7 @@ import {
 import { Helmet } from 'react-helmet-async';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { tripApi } from '../api/trip.api';
-import { Seat, Trip } from '../types/api.types';
+import { Seat, Trip, TripItinerary, TripSegment, TripStop } from '../types/api.types';
 
 type SortValue = 'earliest' | 'price-asc' | 'price-desc' | 'duration-asc' | 'seats-desc';
 
@@ -184,13 +184,23 @@ const formatDuration = (trip: Trip) => {
     return `${hours} giờ ${rest} phút`;
 };
 
-const getTrainType = (trip: Trip) => {
+const getTripCategoryValue = (trip: Trip) => {
+    const category = normalizeText(trip.trainCategory || '').replace(/[^a-z0-9]+/g, '_').toUpperCase();
     const code = normalizeText(trip.trainCode || '');
     const carriageText = normalizeText((trip.carriages || []).map((carriage) => carriage.carriageTypeName).join(' '));
-    if (code.includes('tet') || code.includes('tt')) return 'Tàu Tết';
+
+    if (category === 'HIGH_QUALITY' || category === 'CLC') return 'CLC';
+    if (category === 'SUBURBAN') return 'SUBURBAN';
+    if (category === 'TET' || category === 'HOLIDAY') return 'TET';
+    if (category === 'SE_TN') return 'SE_TN';
+    if (code.includes('tet') || code.includes('tt')) return 'TET';
     if (code.includes('clc') || code.includes('vip') || carriageText.includes('vip') || carriageText.includes('chat luong cao')) return 'CLC';
-    if (code.startsWith('lp') || code.startsWith('sp') || code.includes('ngoai o')) return 'Ngoại ô';
-    return 'SE/TN';
+    if (code.startsWith('lp') || code.startsWith('sp') || code.includes('ngoai o')) return 'SUBURBAN';
+    return 'SE_TN';
+};
+
+const getTrainType = (trip: Trip) => {
+    return getLabel(TRAIN_TYPES, getTripCategoryValue(trip));
 };
 
 const getSeatLabels = (trip: Trip) => {
@@ -225,6 +235,86 @@ const matchesSeatType = (trip: Trip, value: string) => {
 
 const getLabel = (items: { value: string; label: string }[], value: string) =>
     items.find((item) => item.value === value)?.label || value;
+
+interface RouteSelection {
+    departureStationId: number;
+    departureStationName: string;
+    arrivalStationId: number;
+    arrivalStationName: string;
+    departureOrder: number;
+    arrivalOrder: number;
+    departureTime?: string | null;
+    arrivalTime?: string | null;
+    segments: TripSegment[];
+    availableSeats?: number;
+    minFare?: number;
+    minFareCarriageType?: string;
+}
+
+const sameStation = (left?: string, right?: string) => {
+    if (!left || !right) return false;
+    return normalizeText(left).trim() === normalizeText(right).trim();
+};
+
+const stopTime = (stop: TripStop, type: 'departure' | 'arrival') => {
+    if (type === 'departure') {
+        return stop.estimatedDepartureTime || stop.scheduledDepartureTime || stop.actualDepartureTime || stop.scheduledArrivalTime || null;
+    }
+    return stop.estimatedArrivalTime || stop.scheduledArrivalTime || stop.actualArrivalTime || stop.scheduledDepartureTime || null;
+};
+
+const resolveRouteSelection = (trip: Trip, itinerary?: TripItinerary, departure?: string, arrival?: string): RouteSelection | null => {
+    const stops = itinerary?.stops || [];
+    if (stops.length < 2) return null;
+
+    const fromName = departure || trip.departureStation || stops[0].stationName;
+    const toName = arrival || trip.arrivalStation || stops[stops.length - 1].stationName;
+    const fromStop = stops.find((stop) => sameStation(stop.stationName, fromName));
+    const toStop = stops.find((stop) => sameStation(stop.stationName, toName));
+
+    if (!fromStop || !toStop || fromStop.stopOrder >= toStop.stopOrder) return null;
+
+    const segments = (itinerary?.segments || [])
+        .filter((segment) => segment.segmentOrder >= fromStop.stopOrder && segment.segmentOrder < toStop.stopOrder)
+        .sort((a, b) => a.segmentOrder - b.segmentOrder);
+
+    if (!segments.length) return null;
+
+    const pricesByType = new Map<number, { total: number; count: number; name?: string }>();
+    segments.forEach((segment) => {
+        (segment.prices || [])
+            .filter((price) => String(price.status || 'ACTIVE').toUpperCase() === 'ACTIVE')
+            .filter((price) => String(price.passengerType || 'ADULT').toUpperCase() === 'ADULT')
+            .forEach((price) => {
+                const current = pricesByType.get(price.carriageTypeId) || { total: 0, count: 0, name: price.carriageTypeName };
+                current.total += Number(price.price || 0);
+                current.count += 1;
+                current.name = current.name || price.carriageTypeName;
+                pricesByType.set(price.carriageTypeId, current);
+            });
+    });
+
+    const completePrices = Array.from(pricesByType.values()).filter((item) => item.count === segments.length);
+    const lowest = completePrices.sort((a, b) => a.total - b.total)[0];
+    const availableSeats = segments.length
+        ? Math.min(...segments.map((segment) => Number(segment.availableSeats ?? 0)))
+        : undefined;
+
+    return {
+        departureStationId: fromStop.stationId,
+        departureStationName: fromStop.stationName,
+        arrivalStationId: toStop.stationId,
+        arrivalStationName: toStop.stationName,
+        departureOrder: fromStop.stopOrder,
+        arrivalOrder: toStop.stopOrder,
+        departureTime: stopTime(fromStop, 'departure'),
+        arrivalTime: stopTime(toStop, 'arrival'),
+        segments,
+        availableSeats,
+        minFare: lowest?.total,
+        minFareCarriageType: lowest?.name,
+    };
+};
 
 interface SelectFieldProps {
     icon: React.ElementType;
@@ -437,21 +527,32 @@ interface ScheduleTripCardProps {
     trip: Trip;
     passengers: number;
     promoCode?: string;
+    routeSelection?: RouteSelection | null;
 }
 
-const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, promoCode }) => {
+const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, promoCode, routeSelection }) => {
     const navigate = useNavigate();
     const trainType = getTrainType(trip);
     const inventory = getInventoryStatus(trip);
     const InventoryIcon = inventory.icon;
-    const seats = getAvailableSeats(trip);
+    const seats = routeSelection?.availableSeats ?? getAvailableSeats(trip);
     const seatLabels = getSeatLabels(trip);
-    const displayPrice = getTripPrice(trip);
+    const displayPrice = routeSelection?.minFare ?? getTripPrice(trip);
     const originalPrice = getTripOriginalPrice(trip);
     const hasDiscount = Boolean(trip.promotionApplied && trip.discountAmount && trip.discountAmount > 0);
+    const departureTime = routeSelection?.departureTime || trip.departureTime;
+    const arrivalTime = routeSelection?.arrivalTime || trip.arrivalTime;
+    const departureStation = routeSelection?.departureStationName || trip.departureStation;
+    const arrivalStation = routeSelection?.arrivalStationName || trip.arrivalStation;
     const handleBook = () => {
         const params = new URLSearchParams();
         if (promoCode) params.set('promoCode', promoCode);
+        if (routeSelection) {
+            params.set('departureStationId', String(routeSelection.departureStationId));
+            params.set('arrivalStationId', String(routeSelection.arrivalStationId));
+            params.set('departure', routeSelection.departureStationName);
+            params.set('arrival', routeSelection.arrivalStationName);
+        }
         navigate(`/ticket/${trip.id}${params.toString() ? `?${params.toString()}` : ''}`);
     };
 
@@ -497,8 +598,8 @@ const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, p
                                 <MapPin size={12} className="text-tet-red" />
                                 Ga đi
                             </p>
-                            <p className="text-xl font-black text-gray-900">{formatTime(trip.departureTime)}</p>
-                            <p className="mt-1 text-sm font-bold text-gray-600">{trip.departureStation}</p>
+                            <p className="text-xl font-black text-gray-900">{formatTime(departureTime || undefined)}</p>
+                            <p className="mt-1 text-sm font-bold text-gray-600">{departureStation}</p>
                         </div>
 
                         <div className="flex items-center justify-center gap-3 md:w-32 md:flex-col">
@@ -515,20 +616,32 @@ const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, p
                                 Ga đến
                                 <MapPin size={12} className="text-tet-red" />
                             </p>
-                            <p className="text-xl font-black text-gray-900">{formatTime(trip.arrivalTime)}</p>
-                            <p className="mt-1 text-sm font-bold text-gray-600">{trip.arrivalStation}</p>
+                            <p className="text-xl font-black text-gray-900">{formatTime(arrivalTime || undefined)}</p>
+                            <p className="mt-1 text-sm font-bold text-gray-600">{arrivalStation}</p>
                         </div>
                     </div>
 
                     <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-bold text-gray-500">
                         <span className="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-3 py-2">
                             <CalendarDays size={14} className="text-tet-red" />
-                            {formatDate(trip.departureTime)}
+                            {formatDate(departureTime || trip.departureTime)}
                         </span>
                         <span className="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-3 py-2">
                             <Armchair size={14} className="text-tet-red" />
                             {seatLabels.join(', ')}
                         </span>
+                        {routeSelection && (
+                            <span className="inline-flex items-center gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-tet-red">
+                                <MapPin size={14} />
+                                {routeSelection.segments.length} chang trung gian
+                            </span>
+                        )}
+                        {routeSelection?.minFareCarriageType && (
+                            <span className="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-3 py-2">
+                                <Ticket size={14} className="text-tet-red" />
+                                Gia theo {routeSelection.minFareCarriageType}
+                            </span>
+                        )}
                         <span className="inline-flex items-center gap-1.5 rounded-lg bg-gray-50 px-3 py-2">
                             <BadgeCheck size={14} className="text-tet-red" />
                             {seats} ghế trống
@@ -571,12 +684,32 @@ const Schedules: React.FC = () => {
         queryFn: () => tripApi.getAllTrips(searchParams.get('promoCode') || searchParams.get('promo') || undefined),
     });
 
+    const itineraryQueries = useQueries({
+        queries: trips.map((trip) => ({
+            queryKey: ['trip-itinerary', trip.id],
+            queryFn: () => tripApi.getTripItinerary(trip.id),
+            staleTime: 5 * 60 * 1000,
+            retry: 1,
+        })),
+    });
+
+    const itineraryByTripId = useMemo(() => {
+        const map = new Map<number, TripItinerary>();
+        itineraryQueries.forEach((query, index) => {
+            if (query.data) {
+                map.set(trips[index].id, query.data);
+            }
+        });
+        return map;
+    }, [itineraryQueries, trips]);
+
     const values = useMemo(() => {
         const passengers = Number(searchParams.get('passengers') || 1);
         return {
             departure: searchParams.get('departure') || '',
             arrival: searchParams.get('arrival') || '',
             date: searchParams.get('date') || '',
+            returnDate: searchParams.get('returnDate') || '',
             passengers: Number.isFinite(passengers) && passengers > 0 ? passengers : 1,
             ticketType: searchParams.get('ticketType') || 'one-way',
             timeWindow: searchParams.get('time') || '',
@@ -586,15 +719,20 @@ const Schedules: React.FC = () => {
             maxPrice: searchParams.get('maxPrice') || '',
             ticketStatus: searchParams.get('ticketStatus') || '',
             duration: searchParams.get('duration') || '',
+            upcoming: searchParams.get('upcoming') === 'true' || searchParams.get('upcoming') === '1',
             sort: (searchParams.get('sort') as SortValue) || 'earliest',
             promo: searchParams.get('promoCode') || searchParams.get('promo') || '',
         };
     }, [queryString, searchParams]);
 
     const stationOptions = useMemo(() => {
-        const stations = trips.flatMap((trip) => [trip.departureStation, trip.arrivalStation]).filter(Boolean);
+        const stations = trips.flatMap((trip) => {
+            const itinerary = itineraryByTripId.get(trip.id);
+            const stopNames = itinerary?.stops.map((stop) => stop.stationName) || [];
+            return [trip.departureStation, trip.arrivalStation, ...stopNames];
+        }).filter(Boolean);
         return Array.from(new Set(stations)).sort((a, b) => a.localeCompare(b, 'vi'));
-    }, [trips]);
+    }, [itineraryByTripId, trips]);
 
     const priceBounds = useMemo(() => {
         const prices = trips.map(getTripPrice).filter((price) => price > 0);
@@ -641,24 +779,39 @@ const Schedules: React.FC = () => {
         const maxPrice = Number(values.maxPrice);
 
         const filtered = trips.filter((trip) => {
-            if (values.departure && trip.departureStation !== values.departure) return false;
-            if (values.arrival && trip.arrivalStation !== values.arrival) return false;
-            if (values.date && toDateInputValue(trip.departureTime) !== values.date) return false;
+            const itinerary = itineraryByTripId.get(trip.id);
+            const routeSelection = resolveRouteSelection(trip, itinerary, values.departure, values.arrival);
+            if (values.departure || values.arrival) {
+                if (itinerary && !routeSelection) return false;
+                if (!itinerary && values.departure && trip.departureStation !== values.departure) return false;
+                if (!itinerary && values.arrival && trip.arrivalStation !== values.arrival) return false;
+            }
+
+            const routeDepartureTime = routeSelection?.departureTime || trip.departureTime;
+            if (values.date && toDateInputValue(routeDepartureTime || undefined) !== values.date) return false;
+            if (values.upcoming) {
+                const departureTime = readDate(routeDepartureTime || undefined);
+                if (!departureTime || departureTime < new Date()) return false;
+            }
 
             if (values.timeWindow) {
                 const window = TIME_WINDOWS.find((item) => item.value === values.timeWindow);
-                const minutes = getTimeMinutes(trip.departureTime);
+                const minutes = getTimeMinutes(routeDepartureTime || undefined);
                 if (window && (minutes < window.start || minutes >= window.end)) return false;
             }
 
-            if (values.trainType && getLabel(TRAIN_TYPES, values.trainType) !== getTrainType(trip)) return false;
+            if (values.trainType && getTripCategoryValue(trip) !== values.trainType) return false;
             if (values.seatType && !matchesSeatType(trip, values.seatType)) return false;
 
-            const tripPrice = getTripPrice(trip);
+            const tripPrice = routeSelection?.minFare ?? getTripPrice(trip);
             if (Number.isFinite(minPrice) && minPrice > 0 && tripPrice < minPrice) return false;
             if (Number.isFinite(maxPrice) && maxPrice > 0 && tripPrice > maxPrice) return false;
 
-            if (values.ticketStatus && getInventoryStatus(trip).value !== values.ticketStatus) return false;
+            if (values.ticketStatus) {
+                const routeSeats = routeSelection?.availableSeats;
+                const statusTrip = routeSeats === undefined ? trip : { ...trip, availableSeats: routeSeats };
+                if (getInventoryStatus(statusTrip).value !== values.ticketStatus) return false;
+            }
 
             const duration = parseDurationMinutes(trip);
             if (values.duration === 'under-6' && duration >= 360) return false;
@@ -669,13 +822,15 @@ const Schedules: React.FC = () => {
         });
 
         return [...filtered].sort((a, b) => {
-            if (values.sort === 'price-asc') return getTripPrice(a) - getTripPrice(b);
-            if (values.sort === 'price-desc') return getTripPrice(b) - getTripPrice(a);
+            const routeA = resolveRouteSelection(a, itineraryByTripId.get(a.id), values.departure, values.arrival);
+            const routeB = resolveRouteSelection(b, itineraryByTripId.get(b.id), values.departure, values.arrival);
+            if (values.sort === 'price-asc') return (routeA?.minFare ?? getTripPrice(a)) - (routeB?.minFare ?? getTripPrice(b));
+            if (values.sort === 'price-desc') return (routeB?.minFare ?? getTripPrice(b)) - (routeA?.minFare ?? getTripPrice(a));
             if (values.sort === 'duration-asc') return parseDurationMinutes(a) - parseDurationMinutes(b);
-            if (values.sort === 'seats-desc') return getAvailableSeats(b) - getAvailableSeats(a);
-            return getTimeMinutes(a.departureTime) - getTimeMinutes(b.departureTime);
+            if (values.sort === 'seats-desc') return (routeB?.availableSeats ?? getAvailableSeats(b)) - (routeA?.availableSeats ?? getAvailableSeats(a));
+            return getTimeMinutes(routeA?.departureTime || a.departureTime) - getTimeMinutes(routeB?.departureTime || b.departureTime);
         });
-    }, [trips, values]);
+    }, [itineraryByTripId, trips, values]);
 
     const activeChips = useMemo(() => {
         const chips: { key: string; label: string; remove: () => void }[] = [];
@@ -693,6 +848,14 @@ const Schedules: React.FC = () => {
                 key: 'date',
                 label: new Date(values.date).toLocaleDateString('vi-VN'),
                 remove: () => updateParams({ date: null }),
+            });
+        }
+
+        if (values.ticketType === 'round-trip' && values.returnDate) {
+            chips.push({
+                key: 'returnDate',
+                label: `Ngày về ${new Date(values.returnDate).toLocaleDateString('vi-VN')}`,
+                remove: () => updateParams({ returnDate: null }),
             });
         }
 
@@ -717,6 +880,7 @@ const Schedules: React.FC = () => {
         if (values.seatType) chips.push({ key: 'seatType', label: getLabel(SEAT_TYPES, values.seatType), remove: () => updateParams({ seatType: null }) });
         if (values.ticketStatus) chips.push({ key: 'ticketStatus', label: getLabel(TICKET_STATUSES, values.ticketStatus), remove: () => updateParams({ ticketStatus: null }) });
         if (values.duration) chips.push({ key: 'duration', label: getLabel(DURATION_FILTERS, values.duration), remove: () => updateParams({ duration: null }) });
+        if (values.upcoming) chips.push({ key: 'upcoming', label: 'Chuyáº¿n sáº¯p cháº¡y', remove: () => updateParams({ upcoming: null }) });
         if (values.minPrice || values.maxPrice) {
             chips.push({
                 key: 'price',
@@ -769,7 +933,12 @@ const Schedules: React.FC = () => {
 
                 <div className="sticky top-[72px] z-30 border-y border-gray-100 bg-white/95 backdrop-blur-xl">
                     <div className="mx-auto max-w-7xl px-4 py-4 md:px-12">
-                        <div className="grid gap-3 lg:grid-cols-[1.2fr_1.2fr_0.9fr_0.7fr_0.9fr_auto] lg:items-end">
+                        <div className={cn(
+                            "grid gap-3 lg:items-end",
+                            values.ticketType === 'round-trip'
+                                ? "lg:grid-cols-[1.1fr_1.1fr_0.9fr_0.9fr_0.7fr_0.9fr_auto]"
+                                : "lg:grid-cols-[1.2fr_1.2fr_0.9fr_0.7fr_0.9fr_auto]"
+                        )}>
                             <SelectField
                                 icon={MapPin}
                                 label="Ga đi"
@@ -796,6 +965,21 @@ const Schedules: React.FC = () => {
                                     className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-100"
                                 />
                             </label>
+                            {values.ticketType === 'round-trip' && (
+                                <label className="space-y-1.5">
+                                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
+                                        <CalendarDays size={12} className="text-tet-red" />
+                                        Ngày về
+                                    </span>
+                                    <input
+                                        type="date"
+                                        min={values.date || undefined}
+                                        value={values.returnDate}
+                                        onChange={(event) => updateParams({ returnDate: event.target.value })}
+                                        className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-100"
+                                    />
+                                </label>
+                            )}
                             <label className="space-y-1.5">
                                 <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
                                     <Users size={12} className="text-tet-red" />
@@ -814,7 +998,10 @@ const Schedules: React.FC = () => {
                                 icon={Ticket}
                                 label="Loại vé"
                                 value={values.ticketType}
-                                onChange={(value) => updateParams({ ticketType: value })}
+                                onChange={(value) => updateParams({
+                                    ticketType: value,
+                                    returnDate: value === 'round-trip' ? (values.returnDate || values.date) : null,
+                                })}
                                 options={TICKET_TYPES}
                             />
                             <div className="flex gap-2">
@@ -938,7 +1125,13 @@ const Schedules: React.FC = () => {
                             <>
                                 <div className="space-y-4">
                                     {paginatedTrips.map((trip) => (
-                                        <ScheduleTripCard key={trip.id} trip={trip} passengers={values.passengers} promoCode={values.promo} />
+                                        <ScheduleTripCard
+                                            key={trip.id}
+                                            trip={trip}
+                                            passengers={values.passengers}
+                                            promoCode={values.promo}
+                                            routeSelection={resolveRouteSelection(trip, itineraryByTripId.get(trip.id), values.departure, values.arrival)}
+                                        />
                                     ))}
                                 </div>
 

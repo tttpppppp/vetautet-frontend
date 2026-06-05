@@ -14,6 +14,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { bookingApi } from '../api/booking.api';
 import { ticketApi } from '../api/ticket.api';
+import { tripApi } from '../api/trip.api';
 
 const statusAlias = (status) => {
     const normalized = String(status || '').toUpperCase();
@@ -27,6 +28,44 @@ const canDownloadInvoice = (booking) => {
     const bookingStatus = String(booking?.status || '').toUpperCase();
     const paymentStatus = String(booking?.paymentStatus || '').toUpperCase();
     return bookingStatus === 'CONFIRMED' && (!paymentStatus || paymentStatus === 'SUCCESS');
+};
+
+const orderCodeOf = (booking) => {
+    return booking?.orderNumber || (booking?.bookingId ? `#${booking.bookingId}` : '--');
+};
+
+const stopArrivalTimeOf = (stop) => (
+    stop?.actualArrivalTime || stop?.estimatedArrivalTime || stop?.scheduledArrivalTime || null
+);
+
+const stopDepartureTimeOf = (stop) => (
+    stop?.actualDepartureTime || stop?.estimatedDepartureTime || stop?.scheduledDepartureTime || null
+);
+
+const buildBookedRoutePlan = (bookingDetail, itinerary) => {
+    if (!bookingDetail || !itinerary?.stops?.length) {
+        return { stops: [], segments: [] };
+    }
+
+    const stops = [...itinerary.stops].sort((a, b) => a.stopOrder - b.stopOrder);
+    const segments = [...(itinerary.segments || [])].sort((a, b) => a.segmentOrder - b.segmentOrder);
+    const firstDetail = bookingDetail.details?.[0];
+    const departureStationId = bookingDetail.departureStationId || firstDetail?.departureStationId || itinerary.originStationId;
+    const arrivalStationId = bookingDetail.arrivalStationId || firstDetail?.arrivalStationId || itinerary.destinationStationId;
+    const departureStop = stops.find((stop) => stop.stationId === departureStationId) || stops[0];
+    const arrivalStop = stops.find((stop) => stop.stationId === arrivalStationId) || stops[stops.length - 1];
+
+    if (!departureStop || !arrivalStop || departureStop.stopOrder >= arrivalStop.stopOrder) {
+        return { stops: [], segments: [] };
+    }
+
+    return {
+        stops: stops.filter((stop) => stop.stopOrder >= departureStop.stopOrder && stop.stopOrder <= arrivalStop.stopOrder),
+        segments: segments.filter((segment) =>
+            segment.segmentOrder >= departureStop.stopOrder &&
+            segment.segmentOrder < arrivalStop.stopOrder
+        ),
+    };
 };
 
 const triggerPdfDownload = (blob, bookingId) => {
@@ -116,10 +155,25 @@ const Orders = () => {
         enabled: selectedBookingId > 0,
     });
 
+    const {
+        data: bookingItinerary,
+        isLoading: isItineraryLoading,
+    } = useQuery({
+        queryKey: ['booking-itinerary', bookingDetail?.tripId],
+        queryFn: () => tripApi.getTripItinerary(bookingDetail.tripId),
+        enabled: !!bookingDetail?.tripId,
+        staleTime: 5 * 60 * 1000,
+    });
+
+    const bookedRoutePlan = useMemo(
+        () => buildBookedRoutePlan(bookingDetail, bookingItinerary),
+        [bookingDetail, bookingItinerary],
+    );
+
     const filteredOrders = useMemo(() => {
         return orders.filter((order) => {
             const mappedStatus = statusAlias(order.status);
-            const bookingCode = String(order.bookingId);
+            const bookingCode = `${order.bookingId || ''} ${order.orderNumber || ''}`;
 
             if (activeTab !== 'all' && mappedStatus !== activeTab) return false;
             if (searchQuery && !bookingCode.toLowerCase().includes(searchQuery.toLowerCase())) return false;
@@ -155,6 +209,11 @@ const Orders = () => {
             minute: '2-digit',
             hour12: false,
         }).format(new Date(value));
+    };
+
+    const formatDistance = (value) => {
+        if (value === null || value === undefined) return '';
+        return `${Number(value).toLocaleString(i18n.language === 'en' ? 'en-US' : 'vi-VN')} km`;
     };
 
     const handleDownloadInvoice = async (bookingId) => {
@@ -229,7 +288,7 @@ const Orders = () => {
                                     <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-8 mb-10">
                                         <div className="space-y-3">
                                             <p className="text-[10px] font-black text-tet-red uppercase tracking-[0.3em]">Chi tiết đơn vé</p>
-                                            <h2 className="text-3xl font-black text-gray-900">#{bookingDetail.bookingId} • {bookingDetail.trainCode}</h2>
+                                            <h2 className="text-3xl font-black text-gray-900">{orderCodeOf(bookingDetail)} • {bookingDetail.trainCode}</h2>
                                             <div className="flex items-center gap-3 text-lg font-bold text-gray-700">
                                                 <span>{bookingDetail.departureStation}</span>
                                                 <ArrowRight size={18} className="text-gray-300" />
@@ -283,6 +342,112 @@ const Orders = () => {
                                                 {bookingDetail.paidAt ? `Thanh toán lúc ${formatDateTime(bookingDetail.paidAt)}` : 'Đang chờ thanh toán'}
                                             </p>
                                         </div>
+                                    </div>
+
+                                    <div className="mb-8 rounded-[1.75rem] border border-red-100 bg-red-50/30 p-5 md:p-6">
+                                        <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                                            <div>
+                                                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-tet-red">Lịch trình chặng đã đặt</p>
+                                                <h3 className="mt-1 text-xl font-black text-gray-900">
+                                                    {bookingDetail.departureStation} → {bookingDetail.arrivalStation}
+                                                </h3>
+                                            </div>
+                                            <p className="text-xs font-bold text-gray-400">
+                                                {bookedRoutePlan.segments.length || 0} chặng • {bookedRoutePlan.stops.length || 0} ga
+                                            </p>
+                                        </div>
+
+                                        {isItineraryLoading ? (
+                                            <div className="flex items-center gap-3 rounded-2xl border border-red-100 bg-white p-4 text-sm font-bold text-gray-500">
+                                                <Train size={18} className="animate-spin text-tet-red" />
+                                                Đang tải chi tiết lịch trình
+                                            </div>
+                                        ) : bookedRoutePlan.stops.length ? (
+                                            <div className="grid grid-cols-1 gap-5 xl:grid-cols-[0.9fr_1.1fr]">
+                                                <div className="rounded-2xl border border-red-100 bg-white p-4">
+                                                    <p className="mb-4 text-[10px] font-black uppercase tracking-widest text-gray-400">Các ga sẽ đi qua</p>
+                                                    <div className="space-y-3">
+                                                        {bookedRoutePlan.stops.map((stop, index) => {
+                                                            const isFirst = index === 0;
+                                                            const isLast = index === bookedRoutePlan.stops.length - 1;
+                                                            return (
+                                                                <div key={stop.id} className="grid grid-cols-[2rem_1fr] gap-3">
+                                                                    <div className="flex flex-col items-center">
+                                                                        <span className={cn(
+                                                                            'flex h-8 w-8 items-center justify-center rounded-full text-xs font-black',
+                                                                            isFirst || isLast ? 'bg-tet-red text-white' : 'bg-red-50 text-tet-red'
+                                                                        )}>
+                                                                            {index + 1}
+                                                                        </span>
+                                                                        {!isLast && <span className="mt-1 h-full min-h-8 w-px bg-red-100" />}
+                                                                    </div>
+                                                                    <div className="rounded-2xl border border-gray-100 bg-gray-50/60 p-3">
+                                                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                            <p className="text-sm font-black text-gray-900">{stop.stationName}</p>
+                                                                            <span className={cn(
+                                                                                'rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-widest',
+                                                                                isFirst ? 'bg-tet-red text-white' : isLast ? 'bg-gray-900 text-white' : 'bg-white text-gray-500 border border-gray-100'
+                                                                            )}>
+                                                                                {isFirst ? 'Ga đi' : isLast ? 'Ga đến' : 'Dừng'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                                                                            <div>
+                                                                                <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Đến</p>
+                                                                                <p className="mt-1 font-black text-gray-900">{formatDateTime(stopArrivalTimeOf(stop))}</p>
+                                                                            </div>
+                                                                            <div>
+                                                                                <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Rời</p>
+                                                                                <p className="mt-1 font-black text-gray-900">{formatDateTime(stopDepartureTimeOf(stop))}</p>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+
+                                                <div className="rounded-2xl border border-red-100 bg-white p-4">
+                                                    <p className="mb-4 text-[10px] font-black uppercase tracking-widest text-gray-400">Chi tiết từng chặng</p>
+                                                    <div className="space-y-3">
+                                                        {bookedRoutePlan.segments.map((segment, index) => (
+                                                            <div key={segment.id} className="rounded-2xl border border-gray-100 bg-gray-50/60 p-4">
+                                                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                                                    <div>
+                                                                        <p className="text-[10px] font-black uppercase tracking-widest text-tet-red">Chặng {index + 1}</p>
+                                                                        <p className="mt-1 text-sm font-black text-gray-900">
+                                                                            {segment.fromStationName} → {segment.toStationName}
+                                                                        </p>
+                                                                    </div>
+                                                                    {segment.distanceKm ? (
+                                                                        <span className="rounded-full bg-white px-3 py-1 text-[10px] font-black text-gray-500">
+                                                                            {formatDistance(segment.distanceKm)}
+                                                                        </span>
+                                                                    ) : null}
+                                                                </div>
+                                                                <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                                                                    <div className="rounded-xl bg-white p-3">
+                                                                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Rời ga</p>
+                                                                        <p className="mt-1 text-sm font-black text-gray-900">{formatDateTime(segment.scheduledDepartureTime)}</p>
+                                                                        <p className="mt-1 text-xs font-bold text-gray-400">{segment.fromStationName}</p>
+                                                                    </div>
+                                                                    <div className="rounded-xl bg-white p-3">
+                                                                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Đến ga</p>
+                                                                        <p className="mt-1 text-sm font-black text-gray-900">{formatDateTime(segment.scheduledArrivalTime)}</p>
+                                                                        <p className="mt-1 text-xs font-bold text-gray-400">{segment.toStationName}</p>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="rounded-2xl border border-red-100 bg-white p-4 text-sm font-bold text-gray-500">
+                                                Chưa có lịch trình chi tiết cho đơn này.
+                                            </div>
+                                        )}
                                     </div>
 
                                     {canDownloadInvoice(bookingDetail) && (
@@ -494,7 +659,7 @@ const Orders = () => {
                                                 </div>
 
                                                 <div className="flex md:hidden items-center justify-between mt-6 pt-6 border-t border-gray-50">
-                                                    <span className="text-sm font-bold text-gray-400 tracking-wider">MÃ ĐƠN: #{order.bookingId}</span>
+                                                    <span className="text-sm font-bold text-gray-400 tracking-wider">MÃ ĐƠN: {orderCodeOf(order)}</span>
                                                     <span className="text-xl font-black text-tet-red">{formatCurrency(order.totalPrice)}</span>
                                                 </div>
                                             </motion.div>

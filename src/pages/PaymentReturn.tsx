@@ -31,6 +31,7 @@ interface PaymentResult {
     code?: string;
     message?: string;
     bookingId?: number | string;
+    orderNumber?: string;
     vnpTxnRef?: string;
     transactionNo?: string;
     responseCode?: string;
@@ -109,13 +110,30 @@ const PaymentReturn: React.FC<PaymentReturnProps> = ({ provider }) => {
         () => Object.fromEntries(searchParams.entries()),
         [queryString]
     );
+    const pendingPayment = useMemo(() => {
+        try {
+            return JSON.parse(sessionStorage.getItem('pendingPayment') || '{}') as { bookingId?: number | string; orderNumber?: string };
+        } catch {
+            return {};
+        }
+    }, [queryString]);
     const bookingId = useMemo(() => parseBookingId(query, result), [query, result]);
     const numericBookingId = Number(bookingId || 0);
+    const orderCode = result?.orderNumber || pendingPayment.orderNumber || (bookingId ? `#${bookingId}` : '--');
     const amount = result?.amount || query.vnp_Amount && Number(query.vnp_Amount) / 100;
-    const transactionNo = result?.transactionNo || query.vnp_TransactionNo;
     const txnRef = result?.vnpTxnRef || query.vnp_TxnRef || result?.orderId;
+    const gatewayTransactionNo = result?.transactionNo || query.vnp_TransactionNo;
+    const transactionNo = gatewayTransactionNo && gatewayTransactionNo !== '0' ? gatewayTransactionNo : txnRef;
     const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
     const [hasTriggeredInvoiceDownload, setHasTriggeredInvoiceDownload] = useState(false);
+    const ticketStatusLabel = status === 'success'
+        ? 'Đã xác nhận'
+        : status === 'checking' || status === 'pending'
+            ? 'Đang xác nhận'
+            : 'Chưa xác nhận';
+    const invoiceStatusLabel = status === 'success'
+        ? (isDownloadingInvoice ? 'Đang tải PDF...' : 'Sẵn sàng tải về')
+        : 'Chưa phát hành';
 
     useEffect(() => {
         const handleReturn = async () => {
@@ -198,7 +216,7 @@ const PaymentReturn: React.FC<PaymentReturnProps> = ({ provider }) => {
     }[status];
 
     const details = [
-        { label: 'Mã đơn', value: bookingId ? `#${bookingId}` : '--' },
+        { label: 'Mã đơn', value: orderCode },
         { label: 'Số tiền', value: formatCurrency(amount) },
         { label: 'Cổng thanh toán', value: provider.toUpperCase() },
         { label: 'Mã giao dịch', value: transactionNo || '--' },
@@ -262,7 +280,7 @@ const PaymentReturn: React.FC<PaymentReturnProps> = ({ provider }) => {
                                     {bookingId && (
                                         <div className="mt-5 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 border border-red-100 text-tet-red">
                                             <TicketCheck size={16} />
-                                            <span className="text-xs font-black uppercase tracking-widest">Booking #{bookingId}</span>
+                                            <span className="text-xs font-black uppercase tracking-widest">Booking {orderCode}</span>
                                         </div>
                                     )}
                                 </div>
@@ -271,12 +289,12 @@ const PaymentReturn: React.FC<PaymentReturnProps> = ({ provider }) => {
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7 pt-5 border-t border-gray-100">
                                 <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-4 py-3">
                                     <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Trạng thái vé</p>
-                                    <p className="text-sm font-black text-gray-900">Đã xác nhận</p>
+                                    <p className="text-sm font-black text-gray-900">{ticketStatusLabel}</p>
                                 </div>
                                 <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-4 py-3">
                                     <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Hóa đơn</p>
                                     <p className="text-sm font-black text-gray-900">
-                                        {isDownloadingInvoice ? 'Đang tải PDF...' : 'Sẵn sàng tải về'}
+                                        {invoiceStatusLabel}
                                     </p>
                                 </div>
                             </div>

@@ -1,5 +1,13 @@
 import axiosInstance from './axiosInstance';
-import { PopularDestination, PopularRoute, Trip, TripCategory, TripSearchParams } from '../types/api.types';
+import {
+  PopularDestination,
+  PopularRoute,
+  Trip,
+  TripCategory,
+  TripFareQuote,
+  TripItinerary,
+  TripSearchParams,
+} from '../types/api.types';
 
 export const tripApi = {
   searchTrips: async (params: TripSearchParams): Promise<Trip[]> => {
@@ -16,9 +24,45 @@ export const tripApi = {
     return response.data;
   },
 
-  getTripDetails: async (id: number, bookingId?: number): Promise<Trip> => {
+  getTripDetails: async (
+    id: number,
+    params?: {
+      bookingId?: number;
+      departureStationId?: number;
+      arrivalStationId?: number;
+    },
+  ): Promise<Trip> => {
     const response = await axiosInstance.get<Trip>(`/trips/${id}`, {
-      params: bookingId ? { bookingId } : undefined,
+      params: params
+        ? {
+            bookingId: params.bookingId || undefined,
+            departureStationId: params.departureStationId || undefined,
+            arrivalStationId: params.arrivalStationId || undefined,
+          }
+        : undefined,
+    });
+    return response.data;
+  },
+
+  getTripItinerary: async (id: number): Promise<TripItinerary> => {
+    const response = await axiosInstance.get<TripItinerary>(`/trips/${id}/itinerary`);
+    return response.data;
+  },
+
+  quoteFare: async (
+    id: number,
+    params: {
+      departureStationId: number;
+      arrivalStationId: number;
+      carriageTypeId: number;
+      passengerType?: string;
+    },
+  ): Promise<TripFareQuote> => {
+    const response = await axiosInstance.get<TripFareQuote>(`/trips/${id}/fare`, {
+      params: {
+        ...params,
+        passengerType: params.passengerType || 'ADULT',
+      },
     });
     return response.data;
   },
@@ -52,6 +96,17 @@ export const tripApi = {
 
   getUpcomingTrips: async (limit = 6): Promise<Trip[]> => {
     const response = await axiosInstance.get<Trip[]>('/trips/upcoming', { params: { limit } });
+    return response.data;
+  },
+
+  getSchedules: async (params: { date?: string; station?: string; limit?: number } = {}): Promise<Trip[]> => {
+    const response = await axiosInstance.get<Trip[]>('/trips/schedules', {
+      params: {
+        date: params.date || undefined,
+        station: params.station || undefined,
+        limit: params.limit || 6,
+      },
+    });
     return response.data;
   },
 };

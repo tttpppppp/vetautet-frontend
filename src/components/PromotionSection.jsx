@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowRight, Clock3, MapPin, Train } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { tripApi } from '../api/trip.api';
 
 const formatPrice = (price) => (price ?? 0).toLocaleString('vi-VN') + 'd';
@@ -12,11 +13,20 @@ const formatDateTime = (value) => {
 };
 
 const PromotionSection = () => {
+    const navigate = useNavigate();
     const { data: routes = [], isLoading } = useQuery({
         queryKey: ['homepage-popular-routes'],
         queryFn: () => tripApi.getPopularRoutes(6),
         staleTime: 60_000,
     });
+
+    const openRouteSchedules = (route) => {
+        const params = new URLSearchParams({
+            departure: route.departureStation,
+            arrival: route.arrivalStation,
+        });
+        navigate(`/schedules?${params.toString()}`);
+    };
 
     return (
         <section className="py-24 bg-gray-50/50">
@@ -84,7 +94,11 @@ const PromotionSection = () => {
                                                 {(route.trainCategories || []).join(', ') || 'Route'}
                                             </div>
                                         </div>
-                                        <button type="button" className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all flex items-center gap-1 shadow-lg shadow-gray-200 shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => openRouteSchedules(route)}
+                                            className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all flex items-center gap-1 shadow-lg shadow-gray-200 shrink-0"
+                                        >
                                             Tìm vé <ArrowRight size={14} />
                                         </button>
                                     </div>

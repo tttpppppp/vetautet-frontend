@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowRight, Clock3, MapPin, Train } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { stationApi } from '../api/station.api';
 
 const formatPrice = (price) => (price ?? 0).toLocaleString('vi-VN') + 'd';
@@ -11,11 +12,17 @@ const formatTime = (value) => {
 };
 
 const DestinationsSection = () => {
+    const navigate = useNavigate();
     const { data: destinations = [], isLoading } = useQuery({
         queryKey: ['homepage-popular-destinations'],
         queryFn: () => stationApi.getPopularStations(6),
         staleTime: 60_000,
     });
+
+    const openDestinationSchedules = (stationName) => {
+        const params = new URLSearchParams({ arrival: stationName });
+        navigate(`/schedules?${params.toString()}`);
+    };
 
     return (
         <section className="py-24 bg-white">
@@ -77,7 +84,11 @@ const DestinationsSection = () => {
                                             <Clock3 size={14} className="text-tet-red" />
                                             {formatTime(destination.nextDepartureTime)}
                                         </div>
-                                        <button type="button" className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all flex items-center gap-1 shadow-lg shadow-gray-200">
+                                        <button
+                                            type="button"
+                                            onClick={() => openDestinationSchedules(destination.stationName)}
+                                            className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all flex items-center gap-1 shadow-lg shadow-gray-200"
+                                        >
                                             Xem ga <ArrowRight size={14} />
                                         </button>
                                     </div>

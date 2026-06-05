@@ -101,6 +101,7 @@ export interface Carriage {
 export interface Trip {
   id: number;
   trainCode: string;
+  trainCategory?: string;
   departureStation: string;
   arrivalStation: string;
   departureTime: string;
@@ -164,13 +165,136 @@ export interface TripSearchParams {
   promoCode?: string;
 }
 
+export interface TripStop {
+  id: number;
+  stationId: number;
+  stationCode?: string;
+  stationName: string;
+  stopOrder: number;
+  scheduledArrivalTime?: string | null;
+  scheduledDepartureTime?: string | null;
+  estimatedArrivalTime?: string | null;
+  estimatedDepartureTime?: string | null;
+  actualArrivalTime?: string | null;
+  actualDepartureTime?: string | null;
+  distanceFromOriginKm?: number | null;
+  status?: string;
+  platform?: string | null;
+  note?: string | null;
+}
+
+export interface TripSegmentPrice {
+  id?: number;
+  segmentId: number;
+  carriageTypeId: number;
+  carriageTypeCode?: string;
+  carriageTypeName?: string;
+  passengerType: string;
+  price: number;
+  currency?: string;
+  status?: string;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+}
+
+export interface TripSegment {
+  id: number;
+  segmentOrder: number;
+  fromStopId: number;
+  toStopId: number;
+  fromStationId: number;
+  fromStationCode?: string;
+  fromStationName: string;
+  toStationId: number;
+  toStationCode?: string;
+  toStationName: string;
+  scheduledDepartureTime?: string | null;
+  scheduledArrivalTime?: string | null;
+  distanceKm?: number | null;
+  status?: string;
+  availableSeats?: number;
+  prices?: TripSegmentPrice[];
+}
+
+export interface TripItinerary {
+  tripId: number;
+  trainCode?: string;
+  trainCategory?: string;
+  serviceDate?: string | null;
+  originStationId?: number;
+  originStationName?: string;
+  destinationStationId?: number;
+  destinationStationName?: string;
+  scheduledDepartureTime?: string | null;
+  scheduledArrivalTime?: string | null;
+  status?: string;
+  stops: TripStop[];
+  segments: TripSegment[];
+}
+
+export interface TripFareQuote {
+  tripId: number;
+  departureStationId: number;
+  departureStationName: string;
+  arrivalStationId: number;
+  arrivalStationName: string;
+  carriageTypeId: number;
+  carriageTypeCode?: string;
+  carriageTypeName?: string;
+  passengerType: string;
+  totalPrice: number;
+  currency?: string;
+  availableSeats?: number;
+  segmentIds: number[];
+  segments: TripSegment[];
+}
+
+export interface TripStopRequest {
+  stationId: number;
+  stopOrder: number;
+  scheduledArrivalTime?: string | null;
+  scheduledDepartureTime?: string | null;
+  estimatedArrivalTime?: string | null;
+  estimatedDepartureTime?: string | null;
+  actualArrivalTime?: string | null;
+  actualDepartureTime?: string | null;
+  distanceFromOriginKm?: number | null;
+  status?: string;
+  platform?: string | null;
+  note?: string | null;
+}
+
+export interface TripStopsUpsertRequest {
+  stops: TripStopRequest[];
+}
+
+export interface TripSegmentPriceRequest {
+  segmentId: number;
+  carriageTypeId: number;
+  passengerType?: string;
+  price: number;
+  currency?: string;
+  status?: string;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+}
+
+export interface TripSegmentPricesUpsertRequest {
+  prices: TripSegmentPriceRequest[];
+}
+
 // ============= Booking =============
 export interface BookingRequest {
   tripId: number;
+  departureStationId?: number;
+  arrivalStationId?: number;
   ticketIds: number[];
   promoCode?: string;
   passengers: PassengerRequest[];
-  passengerName?: string;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  contactIdCard?: string;
 }
 
 export interface PassengerRequest {
@@ -180,29 +304,45 @@ export interface PassengerRequest {
 }
 
 export interface BookingResponse {
-  bookingId: number;
+  bookingId?: number;
+  requestId?: string;
+  orderNumber?: string;
+  storageMonth?: string;
   status: string;
   originalPrice?: number;
   promoCode?: string | null;
   discountAmount?: number;
-  totalPrice: number;
-  expiredAt: string;
+  totalPrice?: number;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  contactIdCard?: string;
+  expiredAt?: string;
   seatNumbers?: string[];
   ticketIds?: number[];
 }
 
 export interface MyBookingSummary {
   bookingId: number;
+  requestId?: string;
+  orderNumber?: string;
+  storageMonth?: string;
   status: string;
   originalPrice?: number;
   promoCode?: string | null;
   discountAmount?: number;
   totalPrice: number;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  contactIdCard?: string;
   expiredAt?: string;
   createdAt?: string;
   tripId: number;
   trainCode: string;
+  departureStationId?: number;
   departureStation: string;
+  arrivalStationId?: number;
   arrivalStation: string;
   departureTime: string;
   arrivalTime?: string;
@@ -223,6 +363,11 @@ export interface BookingDetailItem {
   seatNumber: string;
   carriageNumber?: string;
   carriageTypeName?: string;
+  departureStationId?: number;
+  departureStation?: string;
+  arrivalStationId?: number;
+  arrivalStation?: string;
+  segmentIds?: string;
   price: number;
   passengerName?: string;
   passengerIdCard?: string;
@@ -239,10 +384,17 @@ export interface SeatStatusEvent {
   seatNumber?: string;
   status: SeatStatus | string;
   bookingId?: number | null;
+  departureStationId?: number | null;
+  arrivalStationId?: number | null;
+  segmentIds?: string | number[] | null;
 }
 
 export interface UpdateBookingRequest {
   passengers: PassengerRequest[];
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  contactIdCard?: string;
 }
 
 export interface PaymentRedirectResponse {
@@ -304,4 +456,154 @@ export interface UserNotification {
 // ============= Upload =============
 export interface UploadResponse {
   imageUrl: string;
+}
+
+// ============= Admin =============
+export interface StationRequest {
+  name: string;
+  code: string;
+  location: string;
+}
+
+export interface StationResponse extends StationRequest {
+  id: number;
+}
+
+export interface TrainRequest {
+  code: string;
+  category: string;
+  description?: string;
+}
+
+export interface TrainResponse extends TrainRequest {
+  id: number;
+}
+
+export interface TripCreateRequest {
+  trainId: number;
+  departureStationId: number;
+  arrivalStationId: number;
+  departureTime: string;
+  arrivalTime: string;
+  status: string;
+}
+
+export interface AdminTripResponse {
+  id: number;
+  trainCode: string;
+  trainCategory?: string;
+  departureStation: string;
+  arrivalStation: string;
+  departureTime: string;
+  arrivalTime?: string;
+  duration?: number | string;
+  price?: number | null;
+  minPrice?: number | null;
+  availableSeats?: number;
+  totalSeats?: number;
+  status?: string;
+  carriages?: Carriage[] | null;
+}
+
+export interface TicketResponse {
+  id: number;
+  ticketId?: number;
+  tripId?: number;
+  trainCode?: string;
+  seatNumber?: string;
+  carriageNumber?: string | number;
+  carriageTypeName?: string;
+  price: number;
+  status: string;
+  bookingId?: number | null;
+  passengerName?: string;
+}
+
+export interface TicketUpdateRequest {
+  price: number;
+  status: string;
+}
+
+export interface UserResponse extends User {
+  isEmailVerified?: boolean;
+}
+
+export interface UserUpdateRequest {
+  name?: string;
+  phone?: string;
+  roles: string[];
+}
+
+export interface PromotionRequest {
+  title: string;
+  description: string;
+  code: string;
+  discountType: string;
+  discountValue: number;
+  maxDiscountAmount?: number | null;
+  minOrderAmount?: number | null;
+  startsAt: string;
+  endsAt: string;
+  conditions?: string;
+  route?: string;
+  categories: string[];
+  usageLimit?: number | null;
+  usedCount?: number | null;
+  easeScore?: number;
+  status: string;
+}
+
+export interface PromotionResponse extends PromotionRequest {
+  id: number | string;
+  createdAt?: string;
+  active?: boolean;
+  expiringSoon?: boolean;
+  daysLeft?: number;
+  discountLabel?: string;
+}
+
+export interface AdminPromotionQuery {
+  q?: string;
+  discount?: number;
+  type?: string;
+  category?: string;
+  status?: string;
+  route?: string;
+  sort?: string;
+}
+
+export interface AdminStatusCount {
+  status: string;
+  count: number;
+}
+
+export interface AdminRouteStats {
+  route: string;
+  departureStation: string;
+  arrivalStation: string;
+  tripsCount: number;
+  availableSeats: number;
+  minPrice?: number | null;
+}
+
+export interface AdminStatsResponse {
+  totalBookings: number;
+  revenueBookings: number;
+  pendingBookings: number;
+  cancelledBookings: number;
+  expiredBookings: number;
+  revenue: number;
+  averageBookingValue: number;
+  totalTrips: number;
+  activeTrips: number;
+  totalSeats: number;
+  availableSeats: number;
+  occupiedSeats: number;
+  totalStations: number;
+  totalTrains: number;
+  totalUsers: number;
+  totalPromotions: number;
+  activePromotions: number;
+  bookingStatusCounts: AdminStatusCount[];
+  topRoutes: AdminRouteStats[];
 }

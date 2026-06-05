@@ -1,6 +1,7 @@
 import React from 'react';
-import { ChevronRight, Train } from 'lucide-react';
+import { CalendarClock, ChevronRight, Train } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { tripApi } from '../api/trip.api';
 import TicketCard from './TicketCard.tsx';
 
@@ -14,17 +15,29 @@ const UpcomingDeparturesSection = () => {
     return (
         <section className="py-24 bg-white">
             <div className="max-w-7xl mx-auto px-6 md:px-12">
-                <div className="max-w-2xl mb-12">
+                <div className="mb-12">
                     <div className="flex items-center gap-2 mb-3">
                         <span className="h-1 w-8 bg-tet-red rounded-full"></span>
                         <span className="text-tet-red font-black text-[10px] uppercase tracking-[0.2em]">Sắp khởi hành</span>
                     </div>
-                    <h2 className="text-3xl md:text-5xl font-black text-gray-900 mb-4 leading-tight">
-                        Chuyến tàu <span className="text-tet-red">sắp chạy</span>
-                    </h2>
-                    <p className="text-gray-500 font-medium max-w-lg">
-                        Danh sách các chuyến sắp khởi hành gần nhất để đặt nhanh.
-                    </p>
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                            <h2 className="text-3xl md:text-5xl font-black text-gray-900 mb-4 leading-tight">
+                                Chuyến tàu <span className="text-tet-red">sắp chạy</span>
+                            </h2>
+                            <p className="text-gray-500 font-medium max-w-lg">
+                                Danh sách các chuyến sắp khởi hành gần nhất để đặt nhanh.
+                            </p>
+                        </div>
+                        <Link
+                            to="/schedules?upcoming=true&sort=earliest"
+                            className="inline-flex items-center gap-1.5 self-start rounded-full px-1 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-gray-500 transition-colors hover:text-tet-red md:mt-4"
+                        >
+                            <CalendarClock size={15} />
+                            <span>Xem chuyến sắp chạy</span>
+                            <ChevronRight size={14} />
+                        </Link>
+                    </div>
                 </div>
 
                 {isLoading ? (
@@ -40,12 +53,6 @@ const UpcomingDeparturesSection = () => {
                     </div>
                 )}
 
-                <div className="mt-16 text-center">
-                    <button type="button" className="px-10 py-5 bg-white border border-gray-100 text-gray-900 font-black rounded-2xl shadow-sm hover:shadow-md transition-all inline-flex items-center gap-3 group">
-                        Xem các chuyến sắp chạy
-                        <ChevronRight className="group-hover:translate-x-1 transition-transform" />
-                    </button>
-                </div>
             </div>
         </section>
     );
