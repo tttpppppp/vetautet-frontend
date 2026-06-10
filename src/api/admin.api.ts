@@ -4,6 +4,8 @@ import {
   AdminStatsResponse,
   AdminTripResponse,
   BookingResponse,
+  PassengerFareRule,
+  PassengerFareRuleUpsertRequest,
   PromotionRequest,
   PromotionResponse,
   StationRequest,
@@ -69,6 +71,15 @@ export const adminApi = {
   },
   deletePromotion: async (id: number | string): Promise<void> => {
     await axiosInstance.delete(`/admin/promotions/${id}`);
+  },
+
+  getPassengerFareRules: async (): Promise<PassengerFareRule[]> => {
+    const response = await axiosInstance.get<PassengerFareRule[]>('/admin/passenger-fare-rules');
+    return response.data;
+  },
+  updatePassengerFareRules: async (data: PassengerFareRuleUpsertRequest): Promise<PassengerFareRule[]> => {
+    const response = await axiosInstance.put<PassengerFareRule[]>('/admin/passenger-fare-rules', data);
+    return response.data;
   },
 
   getStations: async (): Promise<StationResponse[]> => {

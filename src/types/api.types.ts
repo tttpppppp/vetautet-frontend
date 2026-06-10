@@ -77,7 +77,7 @@ export interface VerifyEmailResponse {
 }
 
 // ============= Trip =============
-export type SeatStatus = 'AVAILABLE' | 'HOLD' | 'HELD' | 'PENDING' | 'BOOKED' | 'SOLD';
+export type SeatStatus = 'AVAILABLE' | 'HOLD' | 'HELD' | 'PENDING' | 'QUEUED' | 'BOOKED' | 'SOLD';
 
 export interface Seat {
   id: number;
@@ -283,6 +283,41 @@ export interface TripSegmentPricesUpsertRequest {
   prices: TripSegmentPriceRequest[];
 }
 
+export interface PassengerFareRule {
+  id?: number;
+  passengerType: string;
+  label: string;
+  minAge?: number | null;
+  maxAge?: number | null;
+  discountPercent: number;
+  fareMultiplier: number;
+  discountLabel?: string | null;
+  verificationRequired?: boolean;
+  description?: string | null;
+  sortOrder?: number;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PassengerFareRuleRequest {
+  id?: number;
+  passengerType: string;
+  label: string;
+  minAge?: number | null;
+  maxAge?: number | null;
+  discountPercent?: number;
+  fareMultiplier?: number;
+  verificationRequired?: boolean;
+  description?: string | null;
+  sortOrder?: number;
+  status?: string;
+}
+
+export interface PassengerFareRuleUpsertRequest {
+  rules: PassengerFareRuleRequest[];
+}
+
 // ============= Booking =============
 export interface BookingRequest {
   tripId: number;
@@ -301,6 +336,7 @@ export interface PassengerRequest {
   ticketId: number;
   name: string;
   idCard: string;
+  passengerType?: string;
 }
 
 export interface BookingResponse {
@@ -586,6 +622,19 @@ export interface AdminRouteStats {
   minPrice?: number | null;
 }
 
+export interface AdminTimeSeriesStats {
+  period: string;
+  label: string;
+  count: number;
+  revenue?: number | null;
+}
+
+export interface AdminPurchaseStats {
+  name: string;
+  count: number;
+  revenue?: number | null;
+}
+
 export interface AdminStatsResponse {
   totalBookings: number;
   revenueBookings: number;
@@ -606,4 +655,9 @@ export interface AdminStatsResponse {
   activePromotions: number;
   bookingStatusCounts: AdminStatusCount[];
   topRoutes: AdminRouteStats[];
+  dailyBookings: AdminTimeSeriesStats[];
+  monthlyBookings: AdminTimeSeriesStats[];
+  yearlyBookings: AdminTimeSeriesStats[];
+  topPurchasedTrains: AdminPurchaseStats[];
+  topPurchasedSeatTypes: AdminPurchaseStats[];
 }

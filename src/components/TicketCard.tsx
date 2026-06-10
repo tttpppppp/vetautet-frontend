@@ -3,6 +3,7 @@ import { Train, Clock, Armchair, BadgePercent, ChevronRight } from 'lucide-react
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Trip } from '../types/api.types';
+import { buildSchedulesParamsFromStoredState } from '../lib/searchState';
 
 interface TicketCardProps {
     ticket: Trip;
@@ -33,6 +34,14 @@ const TicketCard: React.FC<TicketCardProps> = ({ ticket, viewType = 'grid' }) =>
     const displayPrice = ticket.price ?? ticket.minPrice ?? 0;
     const remainingSeats = ticket.availableSeats ?? 0;
     const carriageLabel = ticket.carriages?.[0]?.carriageTypeName || t('tickets.seat_types.soft_seat');
+    const openRouteSchedules = () => {
+        const params = buildSchedulesParamsFromStoredState({
+            departure: ticket.departureStation,
+            arrival: ticket.arrivalStation,
+            fallbackDate: ticket.departureTime,
+        });
+        navigate(`/search?${params.toString()}`);
+    };
 
     // Format times
     const formatTime = (timeStr: string) => {
@@ -99,7 +108,7 @@ const TicketCard: React.FC<TicketCardProps> = ({ ticket, viewType = 'grid' }) =>
 
                         <div className="flex justify-stretch sm:justify-end mt-2 sm:mt-0">
                             <button
-                                onClick={() => navigate(`/ticket/${ticket.id}`)}
+                                onClick={openRouteSchedules}
                                 className="w-full sm:w-auto bg-gray-900 text-white px-6 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-tet-red transition-all shadow-lg shadow-gray-200 flex items-center justify-center gap-2"
                             >
                                 {t('tickets.select')} <ChevronRight size={14} />
@@ -166,7 +175,7 @@ const TicketCard: React.FC<TicketCardProps> = ({ ticket, viewType = 'grid' }) =>
                     </div>
 
                     <button
-                        onClick={() => navigate(`/ticket/${ticket.id}`)}
+                        onClick={openRouteSchedules}
                         className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-tet-red transition-all transform hover:scale-105 active:scale-95 flex items-center gap-1 shadow-lg shadow-gray-200"
                     >
                         {t('tickets.select')} <ChevronRight size={14} />

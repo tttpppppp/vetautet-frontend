@@ -169,17 +169,14 @@ const Header = () => {
 
     const topNavLinks = [
         { name: t('header.promotions'), href: '/promotions', icon: <div className="w-5 h-5 flex items-center justify-center bg-tet-yellow rounded-full text-[10px] text-red-700 font-bold">%</div> },
-        { name: t('header.explore'), href: '/explore' },
         { name: t('header.contact'), href: '#' },
         { name: t('header.my_bookings'), href: '/orders' },
-        ...(canOpenAdmin ? [{ name: 'Admin', href: '/admin', icon: <LayoutDashboard size={16} /> }] : []),
-        ...(canVerifyTickets ? [{ name: 'Quét QR', href: '/staff/verify-qr', icon: <ScanLine size={16} /> }] : []),
     ];
 
     const bottomNavLinks = [
         { name: t('header.train_se_tn'), icon: <Train size={18} />, href: '#' },
         { name: t('header.train_tet'), icon: <TrainFront size={18} className="text-tet-red" />, href: '#' },
-        { name: t('header.schedule'), icon: <Bus size={18} />, href: '/schedules' },
+        { name: t('header.schedule'), icon: <Bus size={18} />, href: '/search' },
         { name: t('header.promotions'), icon: <Ticket size={18} />, href: '/promotions' },
         ...(canOpenAdmin ? [{ name: 'Admin', icon: <LayoutDashboard size={18} />, href: '/admin' }] : []),
         ...(canVerifyTickets ? [{ name: 'Quét QR', icon: <ScanLine size={18} />, href: '/staff/verify-qr' }] : []),

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 import { cn } from '@/lib/utils';
@@ -13,11 +13,14 @@ import {
     Ban,
     CalendarDays,
     CheckCircle2,
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
     Clock3,
     Filter,
     MapPin,
+    Minus,
+    Plus,
     RotateCcw,
     Search,
     SlidersHorizontal,
@@ -29,11 +32,14 @@ import {
 import { Helmet } from 'react-helmet-async';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { tripApi } from '../api/trip.api';
-import { Seat, Trip, TripItinerary, TripSegment, TripStop } from '../types/api.types';
+import { Seat, Trip, TripCategory, TripItinerary, TripSegment, TripStop } from '../types/api.types';
+import { buildPassengerOptions } from '../lib/passengerFareRules';
 
 type SortValue = 'earliest' | 'price-asc' | 'price-desc' | 'duration-asc' | 'seats-desc';
 
 const ITEMS_PER_PAGE = 6;
+const DATE_RAIL_VISIBLE_DAYS = 9;
+const DATE_RAIL_SHIFT_DAYS = 1;
 
 const TIME_WINDOWS = [
     { value: '00-06', label: '00:00 - 06:00', shortLabel: '00:00 - 06:00', start: 0, end: 6 * 60 },
@@ -55,6 +61,17 @@ const SEAT_TYPES = [
     { value: 'cabin4', label: 'Khoang 4' },
     { value: 'cabin6', label: 'Khoang 6' },
 ];
+
+type FilterOption = { value: string; label: string };
+
+const TRAIN_TYPE_LABELS: Record<string, string> = {
+    SE_TN: 'SE/TN',
+    CLC: 'CLC',
+    HIGH_QUALITY: 'CLC',
+    SUBURBAN: 'Ngoại ô',
+    TET: 'Tàu Tết',
+    HOLIDAY: 'Tàu Tết',
+};
 
 const TICKET_STATUSES = [
     { value: 'available', label: 'Còn vé' },
@@ -81,6 +98,118 @@ const TICKET_TYPES = [
     { value: 'round-trip', label: 'Khứ hồi' },
 ];
 
+type PassengerCounts = {
+    adult: number;
+    child: number;
+    senior: number;
+    student: number;
+    total: number;
+};
+
+const MAX_PASSENGERS = 10;
+
+type PassengerKey = Exclude<keyof PassengerCounts, 'total'>;
+
+const PASSENGER_OPTIONS: { key: PassengerKey; label: string; description: string; discount?: string }[] = [
+    { key: 'adult', label: 'Người lớn', description: 'Từ 10 - 59 tuổi' },
+    { key: 'child', label: 'Trẻ em', description: '6 - 9 tuổi', discount: '-25%' },
+    { key: 'senior', label: 'Người cao tuổi', description: 'Từ 60 tuổi', discount: '-15%' },
+    { key: 'student', label: 'Sinh viên', description: 'Thẻ SV', discount: '-10%' },
+];
+
+const PASSENGER_NOTES = [
+    'Một người lớn được kèm 1 trẻ dưới 6 tuổi miễn vé, ngồi chung chỗ.',
+    'Người cao tuổi: Công dân Việt Nam từ 60 tuổi.',
+    'Sinh viên: Công dân Việt Nam có thẻ sinh viên hợp lệ.',
+];
+
+const normalizePassengerCounts = (counts: Partial<PassengerCounts>): PassengerCounts => {
+    let remaining = MAX_PASSENGERS;
+    const adult = Math.min(Math.max(1, Math.floor(Number(counts.adult ?? 1) || 1)), remaining);
+    remaining -= adult;
+    const child = Math.min(Math.max(0, Math.floor(Number(counts.child ?? 0) || 0)), remaining);
+    remaining -= child;
+    const senior = Math.min(Math.max(0, Math.floor(Number(counts.senior ?? 0) || 0)), remaining);
+    remaining -= senior;
+    const student = Math.min(Math.max(0, Math.floor(Number(counts.student ?? 0) || 0)), remaining);
+    return {
+        adult,
+        child,
+        senior,
+        student,
+        total: adult + child + senior + student,
+    };
+};
+
+const passengerSummary = (counts: PassengerCounts, options = PASSENGER_OPTIONS) => {
+    const parts = options
+        .map((option) => {
+            const count = counts[option.key];
+            return count > 0 ? `${count} ${option.label.toLowerCase()}` : '';
+        })
+        .filter(Boolean);
+    return parts.join(', ');
+};
+
+const readPassengerCount = (params: URLSearchParams, keys: string[], fallback = 0) => {
+    const rawValue = keys.map((key) => params.get(key)).find((value) => value !== null);
+    const parsed = Number(rawValue ?? fallback);
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    return Math.floor(parsed);
+};
+
+const readQueryValue = (params: URLSearchParams, keys: string[]) =>
+    keys.map((key) => params.get(key)).find((value) => value !== null && value !== '') || '';
+
+const QUERY_ALIASES: Record<string, string[]> = {
+    departure: ['departPlaceName', 'departPlaceCode'],
+    arrival: ['returnPlaceName', 'returnPlaceCode'],
+    date: ['departDate'],
+    ticketType: ['roundTrip'],
+    passengers: ['totalTicket'],
+    passenger_adult: ['adults'],
+    passenger_child: ['childs', 'children'],
+    passenger_senior: ['elderlys', 'seniors'],
+    passenger_student: ['students'],
+};
+
+const deleteQueryKey = (params: URLSearchParams, key: string) => {
+    [key, ...(QUERY_ALIASES[key] || [])].forEach((alias) => params.delete(alias));
+};
+
+const getPassengerCountsFromParams = (params: URLSearchParams): PassengerCounts => {
+    let adult = readPassengerCount(params, ['passenger_adult', 'adults'], 0);
+    const child = readPassengerCount(params, ['passenger_child', 'childs', 'children'], 0);
+    const senior = readPassengerCount(params, ['passenger_senior', 'elderlys', 'seniors'], 0);
+    const student = readPassengerCount(params, ['passenger_student', 'students'], 0);
+    const explicitTotal = readPassengerCount(params, ['passengers', 'totalTicket'], 0);
+    const breakdownTotal = adult + child + senior + student;
+
+    if (!breakdownTotal) {
+        adult = explicitTotal || 1;
+    } else if (explicitTotal > breakdownTotal) {
+        adult += explicitTotal - breakdownTotal;
+    }
+
+    let remaining = MAX_PASSENGERS;
+    adult = Math.min(adult, remaining);
+    remaining -= adult;
+    const cappedChild = Math.min(child, remaining);
+    remaining -= cappedChild;
+    const cappedSenior = Math.min(senior, remaining);
+    remaining -= cappedSenior;
+    const cappedStudent = Math.min(student, remaining);
+    const total = Math.max(1, adult + cappedChild + cappedSenior + cappedStudent);
+
+    return {
+        adult,
+        child: cappedChild,
+        senior: cappedSenior,
+        student: cappedStudent,
+        total,
+    };
+};
+
 const formatCurrency = (value?: number | null) => {
     const amount = Number(value || 0);
     return `${amount.toLocaleString('vi-VN')}đ`;
@@ -94,6 +223,30 @@ const normalizeText = (value = '') =>
         .replace(/Đ/g, 'D')
         .toLowerCase();
 
+const optionValueFromLabel = (value = '') =>
+    normalizeText(value)
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .toUpperCase();
+
+const normalizeTrainTypeValue = (value = '') => {
+    const normalized = optionValueFromLabel(value);
+    if (normalized === 'ALL') return '';
+    if (normalized === 'HIGH_QUALITY') return 'CLC';
+    if (normalized === 'HOLIDAY') return 'TET';
+    return normalized;
+};
+
+const normalizeSeatTypeValue = (value = '') =>
+    normalizeText(value)
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+const addUniqueOption = (map: Map<string, FilterOption>, option?: FilterOption) => {
+    if (!option?.value || !option.label) return;
+    if (!map.has(option.value)) map.set(option.value, option);
+};
+
 const readDate = (value?: string) => {
     if (!value) return null;
     const date = new Date(value);
@@ -106,6 +259,39 @@ const toDateInputValue = (value?: string) => {
     const month = `${date.getMonth() + 1}`.padStart(2, '0');
     const day = `${date.getDate()}`.padStart(2, '0');
     return `${date.getFullYear()}-${month}-${day}`;
+};
+
+const toDateValueFromDate = (date: Date) => {
+    const month = `${date.getMonth() + 1}`.padStart(2, '0');
+    const day = `${date.getDate()}`.padStart(2, '0');
+    return `${date.getFullYear()}-${month}-${day}`;
+};
+
+const parseDateValue = (value?: string) => {
+    if (!value) return new Date();
+    const [year, month, day] = value.split('-').map(Number);
+    if (!year || !month || !day) return new Date();
+    return new Date(year, month - 1, day);
+};
+
+const addDays = (value: string, days: number) => {
+    const date = parseDateValue(value);
+    date.setDate(date.getDate() + days);
+    return toDateValueFromDate(date);
+};
+
+const getTodayDateValue = () => toDateValueFromDate(new Date());
+
+const formatDateRailDay = (value: string) => {
+    const date = parseDateValue(value);
+    const day = `${date.getDate()}`.padStart(2, '0');
+    const month = `${date.getMonth() + 1}`.padStart(2, '0');
+    return `${day}-${month}-${date.getFullYear()}`;
+};
+
+const formatDateRailWeekday = (value: string) => {
+    const date = parseDateValue(value);
+    return date.toLocaleDateString('vi-VN', { weekday: 'short' });
 };
 
 const formatDate = (value?: string) => {
@@ -185,14 +371,11 @@ const formatDuration = (trip: Trip) => {
 };
 
 const getTripCategoryValue = (trip: Trip) => {
-    const category = normalizeText(trip.trainCategory || '').replace(/[^a-z0-9]+/g, '_').toUpperCase();
+    const category = normalizeTrainTypeValue(trip.trainCategory || '');
     const code = normalizeText(trip.trainCode || '');
     const carriageText = normalizeText((trip.carriages || []).map((carriage) => carriage.carriageTypeName).join(' '));
 
-    if (category === 'HIGH_QUALITY' || category === 'CLC') return 'CLC';
-    if (category === 'SUBURBAN') return 'SUBURBAN';
-    if (category === 'TET' || category === 'HOLIDAY') return 'TET';
-    if (category === 'SE_TN') return 'SE_TN';
+    if (category) return category;
     if (code.includes('tet') || code.includes('tt')) return 'TET';
     if (code.includes('clc') || code.includes('vip') || carriageText.includes('vip') || carriageText.includes('chat luong cao')) return 'CLC';
     if (code.startsWith('lp') || code.startsWith('sp') || code.includes('ngoai o')) return 'SUBURBAN';
@@ -201,6 +384,27 @@ const getTripCategoryValue = (trip: Trip) => {
 
 const getTrainType = (trip: Trip) => {
     return getLabel(TRAIN_TYPES, getTripCategoryValue(trip));
+};
+
+const buildTrainTypeOptions = (categories: TripCategory[] = [], trips: Trip[] = []) => {
+    const options = new Map<string, FilterOption>();
+
+    categories.forEach((category) => {
+        const value = normalizeTrainTypeValue(category.code);
+        const label = TRAIN_TYPE_LABELS[value] || TRAIN_TYPE_LABELS[category.code] || category.label || category.code;
+        addUniqueOption(options, { value, label });
+    });
+
+    trips.forEach((trip) => {
+        const value = getTripCategoryValue(trip);
+        const label = TRAIN_TYPE_LABELS[value] || getLabel(TRAIN_TYPES, value);
+        addUniqueOption(options, { value, label });
+    });
+
+    if (!options.size) {
+        TRAIN_TYPES.forEach((option) => addUniqueOption(options, option));
+    }
+    return Array.from(options.values());
 };
 
 const getSeatLabels = (trip: Trip) => {
@@ -216,6 +420,33 @@ const getSeatLabels = (trip: Trip) => {
     return Array.from(labels);
 };
 
+const buildSeatTypeOptions = (trips: Trip[] = []) => {
+    const options = new Map<string, FilterOption>();
+
+    trips.forEach((trip) => {
+        (trip.carriages || []).forEach((carriage) => {
+            const label = String(carriage.carriageTypeName || '').trim();
+            const value = normalizeSeatTypeValue(label);
+            addUniqueOption(options, { value, label });
+        });
+    });
+
+    if (!options.size) {
+        SEAT_TYPES.forEach((option) => addUniqueOption(options, option));
+    }
+
+    return Array.from(options.values()).sort((a, b) => a.label.localeCompare(b.label, 'vi'));
+};
+
+const getTripSeatTypeValues = (trip: Trip) => {
+    const values = new Set<string>();
+    (trip.carriages || []).forEach((carriage) => {
+        values.add(normalizeSeatTypeValue(carriage.carriageTypeName || ''));
+    });
+    getSeatLabels(trip).forEach((label) => values.add(normalizeSeatTypeValue(label)));
+    return values;
+};
+
 const getInventoryStatus = (trip: Trip) => {
     const seats = getAvailableSeats(trip);
     if (seats <= 0) return { value: 'soldout', label: 'Hết vé', icon: Ban, className: 'bg-gray-100 text-gray-500 border-gray-200' };
@@ -225,12 +456,16 @@ const getInventoryStatus = (trip: Trip) => {
 
 const matchesSeatType = (trip: Trip, value: string) => {
     if (!value) return true;
+    const selectedValue = normalizeSeatTypeValue(value);
+    const tripSeatValues = getTripSeatTypeValues(trip);
+    if (tripSeatValues.has(selectedValue)) return true;
+
     const labels = getSeatLabels(trip).map(normalizeText);
     if (value === 'seat') return labels.some((label) => label.includes('ghe') || label.includes('ngoi'));
     if (value === 'bed') return labels.some((label) => label.includes('giuong') || label.includes('nam'));
     if (value === 'cabin4') return labels.some((label) => label.includes('4'));
     if (value === 'cabin6') return labels.some((label) => label.includes('6'));
-    return true;
+    return false;
 };
 
 const getLabel = (items: { value: string; label: string }[], value: string) =>
@@ -344,39 +579,345 @@ const SelectField: React.FC<SelectFieldProps> = ({ icon: Icon, label, value, onC
     </label>
 );
 
-interface FilterOptionGroupProps {
-    title: string;
-    options: { value: string; label: string }[];
+interface DatePickerFieldProps {
+    label: string;
     value: string;
+    min?: string;
+    placeholder?: string;
     onChange: (value: string) => void;
 }
 
-const FilterOptionGroup: React.FC<FilterOptionGroupProps> = ({ title, options, value, onChange }) => (
-    <div>
-        <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-gray-400">{title}</p>
-        <div className="space-y-2">
-            {options.map((option) => {
-                const active = value === option.value;
-                return (
-                    <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => onChange(active ? '' : option.value)}
-                        className={cn(
-                            'flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-sm font-bold transition',
-                            active
-                                ? 'border-tet-red bg-red-50 text-tet-red shadow-sm shadow-red-100'
-                                : 'border-gray-100 bg-white text-gray-600 hover:border-gray-200 hover:bg-gray-50'
-                        )}
-                    >
-                        <span>{option.label}</span>
-                        {active && <CheckCircle2 size={16} />}
-                    </button>
-                );
-            })}
+const DatePickerField: React.FC<DatePickerFieldProps> = ({ label, value, min, placeholder = 'Chọn ngày', onChange }) => {
+    const inputRef = useRef<HTMLInputElement | null>(null);
+
+    const openDatePicker = () => {
+        const input = inputRef.current;
+        if (!input) return;
+        input.focus();
+        if (typeof input.showPicker === 'function') {
+            try {
+                input.showPicker();
+                return;
+            } catch (error) {
+                // Fall through to click for browsers that reject programmatic picker calls.
+            }
+        }
+        input.click();
+    };
+
+    return (
+        <div className="space-y-1.5">
+            <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
+                <CalendarDays size={12} className="text-tet-red" />
+                {label}
+            </span>
+            <div className="group relative">
+                <button
+                    type="button"
+                    onClick={openDatePicker}
+                    className="flex h-11 w-full items-center justify-between gap-2 rounded-xl border border-gray-200 bg-white px-3 text-left text-sm font-black text-gray-900 outline-none transition hover:border-gray-300 focus:border-tet-red focus:ring-4 focus:ring-red-100"
+                >
+                    <span className={cn('truncate', !value && 'font-bold text-gray-400')}>
+                        {value ? formatDateRailDay(value) : placeholder}
+                    </span>
+                    <CalendarDays size={16} className="shrink-0 text-gray-500 transition group-hover:text-tet-red" />
+                </button>
+                <input
+                    ref={inputRef}
+                    aria-label={label}
+                    type="date"
+                    min={min}
+                    value={value}
+                    onChange={(event) => onChange(event.target.value)}
+                    className="pointer-events-none absolute bottom-0 left-3 h-px w-px opacity-0"
+                />
+            </div>
         </div>
-    </div>
-);
+    );
+};
+
+interface PassengerPickerFieldProps {
+    value: PassengerCounts;
+    onChange: (value: PassengerCounts) => void;
+}
+
+const PassengerPickerField: React.FC<PassengerPickerFieldProps> = ({ value, onChange }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const counts = normalizePassengerCounts(value);
+    const { data: passengerFareRules = [] } = useQuery({
+        queryKey: ['passenger-fare-rules'],
+        queryFn: tripApi.getPassengerFareRules,
+        staleTime: 5 * 60 * 1000,
+    });
+    const passengerOptions = useMemo(() => buildPassengerOptions(passengerFareRules), [passengerFareRules]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const updateCount = (key: PassengerKey, delta: number) => {
+        const current = counts[key] || 0;
+        const minValue = key === 'adult' ? 1 : 0;
+        if (delta > 0 && counts.total >= MAX_PASSENGERS) return;
+        const nextValue = Math.max(minValue, current + delta);
+        onChange(normalizePassengerCounts({ ...counts, [key]: nextValue }));
+    };
+
+    return (
+        <div className="relative space-y-1.5" ref={containerRef}>
+            <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
+                <Users size={12} className="text-tet-red" />
+                Số lượng vé
+            </span>
+            <button
+                type="button"
+                onClick={() => setIsOpen((prev) => !prev)}
+                className={cn(
+                    'flex h-11 w-full items-center justify-between gap-2 rounded-xl border bg-white px-3 text-left outline-none transition',
+                    isOpen
+                        ? 'border-tet-red ring-4 ring-red-100'
+                        : 'border-gray-200 hover:border-gray-300'
+                )}
+            >
+                <span className="min-w-0">
+                    <span className="block truncate text-sm font-black text-gray-950">{counts.total} vé</span>
+                    <span className="block truncate text-[10px] font-bold text-gray-400">{passengerSummary(counts, passengerOptions)}</span>
+                </span>
+                <ChevronDown size={15} className={cn('shrink-0 text-gray-400 transition-transform', isOpen && 'rotate-180 text-tet-red')} />
+            </button>
+
+            <AnimatePresence>
+                {isOpen && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                        transition={{ duration: 0.16, ease: 'easeOut' }}
+                        className="absolute right-0 z-50 mt-2 w-[min(92vw,560px)] overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-2xl"
+                    >
+                        <div className="grid md:grid-cols-[minmax(0,1fr)_220px]">
+                            <div className="p-4">
+                                <div className="divide-y divide-gray-100">
+                                    {passengerOptions.map((option) => {
+                                        const current = counts[option.key] || 0;
+                                        const minValue = option.key === 'adult' ? 1 : 0;
+                                        return (
+                                            <div key={option.key} className="flex items-center justify-between gap-4 py-3 first:pt-0">
+                                                <div className="min-w-0">
+                                                    <p className="text-base font-black text-gray-800">{option.label}</p>
+                                                    <p className="mt-1 text-sm font-bold text-gray-400">
+                                                        {option.description}
+                                                        {option.discount && (
+                                                            <span className="ml-2 rounded-md bg-orange-50 px-1.5 py-0.5 font-black text-orange-500">
+                                                                {option.discount}
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                </div>
+                                                <div className="flex shrink-0 items-center gap-3">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateCount(option.key, -1)}
+                                                        disabled={current <= minValue}
+                                                        className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 text-gray-600 transition hover:border-tet-red hover:text-tet-red disabled:cursor-not-allowed disabled:opacity-40"
+                                                    >
+                                                        <Minus size={15} strokeWidth={3} />
+                                                    </button>
+                                                    <span className="w-5 text-center text-lg font-black text-gray-950">{current}</span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateCount(option.key, 1)}
+                                                        disabled={counts.total >= MAX_PASSENGERS}
+                                                        className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 text-gray-600 transition hover:border-tet-red hover:text-tet-red disabled:cursor-not-allowed disabled:opacity-40"
+                                                    >
+                                                        <Plus size={15} strokeWidth={3} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsOpen(false)}
+                                    className="mt-3 flex h-11 w-full items-center justify-center rounded-xl bg-gradient-to-r from-tet-yellow via-[#FFC533] to-[#FF9F1C] text-sm font-black uppercase tracking-wide text-[#7A1A12] shadow-[0_12px_28px_rgba(255,193,7,0.25)]"
+                                >
+                                    Áp dụng
+                                </button>
+                            </div>
+
+                            <div className="space-y-4 bg-slate-50 p-4 text-sm font-semibold leading-6 text-gray-600">
+                                {PASSENGER_NOTES.map((note) => (
+                                    <p key={note} className="flex gap-2">
+                                        <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-500" />
+                                        <span>{note}</span>
+                                    </p>
+                                ))}
+                                <p>
+                                    Đặt vé đoàn từ 10 khách{' '}
+                                    <span className="font-black text-blue-600 underline">Liên hệ.</span>
+                                </p>
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
+
+interface DateRailProps {
+    date: string;
+    departure: string;
+    arrival: string;
+    onChange: (value: string) => void;
+}
+
+const DateRail: React.FC<DateRailProps> = ({ date, departure, arrival, onChange }) => {
+    const todayDate = useMemo(() => getTodayDateValue(), []);
+    const selectedDate = date || todayDate;
+    const [railStartDate, setRailStartDate] = useState(todayDate);
+    const days = useMemo(
+        () => Array.from({ length: DATE_RAIL_VISIBLE_DAYS }, (_, index) => addDays(railStartDate, index)),
+        [railStartDate]
+    );
+    const canGoPrev = railStartDate > todayDate;
+
+    const shiftRail = (step: number) => {
+        setRailStartDate((current) => {
+            const next = addDays(current, step);
+            return next < todayDate ? todayDate : next;
+        });
+    };
+
+    return (
+        <div className="rounded-md border border-gray-200 bg-white shadow-sm">
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
+                <h2 className="text-xl font-black text-[#00447A]">Chọn chiều đi</h2>
+                {(departure || arrival) && (
+                    <p className="text-lg font-semibold text-gray-700">
+                        {departure || 'Ga đi'} <span className="mx-1">→</span> {arrival || 'Ga đến'}
+                    </p>
+                )}
+            </div>
+            <div className="flex items-stretch gap-1 overflow-x-auto px-4 scrollbar-hide">
+                <button
+                    type="button"
+                    onClick={() => shiftRail(-DATE_RAIL_SHIFT_DAYS)}
+                    disabled={!canGoPrev}
+                    className="flex w-10 shrink-0 items-center justify-center text-gray-400 transition hover:text-tet-red disabled:cursor-not-allowed disabled:text-gray-200"
+                    aria-label="Ngày trước"
+                >
+                    <ChevronLeft size={23} />
+                </button>
+                <div className="grid min-w-[900px] flex-1 grid-cols-9">
+                    {days.map((item) => {
+                        const active = item === selectedDate;
+                        return (
+                            <button
+                                key={item}
+                                type="button"
+                                onClick={() => onChange(item)}
+                                className={cn(
+                                    'relative flex min-h-[76px] flex-col items-center justify-center gap-1 px-4 text-center transition',
+                                    active ? 'text-[#13B8D1]' : 'text-gray-500 hover:text-tet-red'
+                                )}
+                            >
+                                <span className="whitespace-nowrap text-base font-semibold">{formatDateRailDay(item)}</span>
+                                <span className="text-sm font-medium capitalize">{formatDateRailWeekday(item)}</span>
+                                {active && <span className="absolute bottom-0 h-1 w-full bg-[#13B8D1]" />}
+                            </button>
+                        );
+                    })}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => shiftRail(DATE_RAIL_SHIFT_DAYS)}
+                    className="flex w-10 shrink-0 items-center justify-center text-gray-400 transition hover:text-tet-red"
+                    aria-label="Ngày sau"
+                >
+                    <ChevronRight size={23} />
+                </button>
+            </div>
+        </div>
+    );
+};
+
+interface FilterOptionGroupProps {
+    title: string;
+    options: FilterOption[];
+    value: string;
+    onChange: (value: string) => void;
+    searchable?: boolean;
+    searchPlaceholder?: string;
+}
+
+const FilterOptionGroup: React.FC<FilterOptionGroupProps> = ({
+    title,
+    options,
+    value,
+    onChange,
+    searchable = false,
+    searchPlaceholder = 'Nhập để lọc',
+}) => {
+    const [keyword, setKeyword] = useState('');
+    const filteredOptions = useMemo(() => {
+        const query = normalizeText(keyword).trim();
+        if (!query) return options;
+        return options.filter((option) => normalizeText(`${option.label} ${option.value}`).includes(query));
+    }, [keyword, options]);
+
+    return (
+        <div>
+            <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-gray-400">{title}</p>
+            {searchable && (
+                <div className="relative mb-3">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300" />
+                    <input
+                        value={keyword}
+                        onChange={(event) => setKeyword(event.target.value)}
+                        placeholder={searchPlaceholder}
+                        className="h-10 w-full rounded-xl border border-gray-100 bg-white pl-9 pr-3 text-xs font-bold text-gray-700 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-50"
+                    />
+                </div>
+            )}
+            <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                {filteredOptions.map((option) => {
+                    const active = value === option.value;
+                    return (
+                        <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => onChange(active ? '' : option.value)}
+                            className={cn(
+                                'flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-sm font-bold transition',
+                                active
+                                    ? 'border-tet-red bg-red-50 text-tet-red shadow-sm shadow-red-100'
+                                    : 'border-gray-100 bg-white text-gray-600 hover:border-gray-200 hover:bg-gray-50'
+                            )}
+                        >
+                            <span className="line-clamp-2">{option.label}</span>
+                            {active && <CheckCircle2 size={16} className="shrink-0" />}
+                        </button>
+                    );
+                })}
+                {!filteredOptions.length && (
+                    <div className="rounded-xl border border-dashed border-gray-200 bg-white px-3 py-4 text-center text-xs font-bold text-gray-400">
+                        Không có lựa chọn phù hợp
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
 
 interface ScheduleFilterPanelProps {
     values: {
@@ -391,9 +932,18 @@ interface ScheduleFilterPanelProps {
     updateParams: (updates: Record<string, string | number | null>) => void;
     clearFilters: () => void;
     activeCount: number;
+    trainTypeOptions: FilterOption[];
+    seatTypeOptions: FilterOption[];
 }
 
-const ScheduleFilterPanel: React.FC<ScheduleFilterPanelProps> = ({ values, updateParams, clearFilters, activeCount }) => {
+const ScheduleFilterPanel: React.FC<ScheduleFilterPanelProps> = ({
+    values,
+    updateParams,
+    clearFilters,
+    activeCount,
+    trainTypeOptions,
+    seatTypeOptions,
+}) => {
     const [advancedOpen, setAdvancedOpen] = useState(false);
 
     return (
@@ -423,16 +973,20 @@ const ScheduleFilterPanel: React.FC<ScheduleFilterPanelProps> = ({ values, updat
 
             <FilterOptionGroup
                 title="Loại tàu"
-                options={TRAIN_TYPES}
+                options={trainTypeOptions}
                 value={values.trainType}
                 onChange={(value) => updateParams({ trainType: value })}
+                searchable
+                searchPlaceholder="Nhập loại tàu"
             />
 
             <FilterOptionGroup
                 title="Hạng ghế"
-                options={SEAT_TYPES}
+                options={seatTypeOptions}
                 value={values.seatType}
                 onChange={(value) => updateParams({ seatType: value })}
+                searchable
+                searchPlaceholder="Nhập hạng ghế"
             />
 
             <FilterOptionGroup
@@ -526,11 +1080,15 @@ const ScheduleSkeleton = () => (
 interface ScheduleTripCardProps {
     trip: Trip;
     passengers: number;
+    passengerCounts: PassengerCounts;
+    date?: string;
+    returnDate?: string;
+    ticketType?: string;
     promoCode?: string;
     routeSelection?: RouteSelection | null;
 }
 
-const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, promoCode, routeSelection }) => {
+const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, passengerCounts, date, returnDate, ticketType, promoCode, routeSelection }) => {
     const navigate = useNavigate();
     const trainType = getTrainType(trip);
     const inventory = getInventoryStatus(trip);
@@ -547,11 +1105,21 @@ const ScheduleTripCard: React.FC<ScheduleTripCardProps> = ({ trip, passengers, p
     const handleBook = () => {
         const params = new URLSearchParams();
         if (promoCode) params.set('promoCode', promoCode);
+        if (date) params.set('date', date);
+        if (ticketType && ticketType !== 'one-way') params.set('ticketType', ticketType);
+        if (ticketType === 'round-trip' && returnDate) params.set('returnDate', returnDate);
         if (routeSelection) {
             params.set('departureStationId', String(routeSelection.departureStationId));
             params.set('arrivalStationId', String(routeSelection.arrivalStationId));
             params.set('departure', routeSelection.departureStationName);
             params.set('arrival', routeSelection.arrivalStationName);
+        }
+        if (passengerCounts.total > 1 || passengerCounts.child || passengerCounts.senior || passengerCounts.student) {
+            params.set('passengers', String(passengerCounts.total));
+            params.set('passenger_adult', String(passengerCounts.adult));
+            if (passengerCounts.child) params.set('passenger_child', String(passengerCounts.child));
+            if (passengerCounts.senior) params.set('passenger_senior', String(passengerCounts.senior));
+            if (passengerCounts.student) params.set('passenger_student', String(passengerCounts.student));
         }
         navigate(`/ticket/${trip.id}${params.toString() ? `?${params.toString()}` : ''}`);
     };
@@ -684,6 +1252,12 @@ const Schedules: React.FC = () => {
         queryFn: () => tripApi.getAllTrips(searchParams.get('promoCode') || searchParams.get('promo') || undefined),
     });
 
+    const { data: trainCategories = [] } = useQuery({
+        queryKey: ['trip-categories'],
+        queryFn: tripApi.getTripCategories,
+        staleTime: 10 * 60 * 1000,
+    });
+
     const itineraryQueries = useQueries({
         queries: trips.map((trip) => ({
             queryKey: ['trip-itinerary', trip.id],
@@ -704,16 +1278,18 @@ const Schedules: React.FC = () => {
     }, [itineraryQueries, trips]);
 
     const values = useMemo(() => {
-        const passengers = Number(searchParams.get('passengers') || 1);
+        const passengerCounts = getPassengerCountsFromParams(searchParams);
+        const isRoundTrip = searchParams.get('roundTrip') === 'true' || searchParams.get('roundTrip') === '1';
         return {
-            departure: searchParams.get('departure') || '',
-            arrival: searchParams.get('arrival') || '',
-            date: searchParams.get('date') || '',
+            departure: readQueryValue(searchParams, ['departure', 'departPlaceName']),
+            arrival: readQueryValue(searchParams, ['arrival', 'returnPlaceName']),
+            date: readQueryValue(searchParams, ['date', 'departDate']),
             returnDate: searchParams.get('returnDate') || '',
-            passengers: Number.isFinite(passengers) && passengers > 0 ? passengers : 1,
-            ticketType: searchParams.get('ticketType') || 'one-way',
+            passengers: passengerCounts.total,
+            passengerCounts,
+            ticketType: searchParams.get('ticketType') || (isRoundTrip ? 'round-trip' : 'one-way'),
             timeWindow: searchParams.get('time') || '',
-            trainType: searchParams.get('trainType') || '',
+            trainType: normalizeTrainTypeValue(searchParams.get('trainType') || ''),
             seatType: searchParams.get('seatType') || '',
             minPrice: searchParams.get('minPrice') || '',
             maxPrice: searchParams.get('maxPrice') || '',
@@ -734,6 +1310,18 @@ const Schedules: React.FC = () => {
         return Array.from(new Set(stations)).sort((a, b) => a.localeCompare(b, 'vi'));
     }, [itineraryByTripId, trips]);
 
+    const stationCodeByName = useMemo(() => {
+        const map = new Map<string, string>();
+        itineraryByTripId.forEach((itinerary) => {
+            itinerary.stops.forEach((stop) => {
+                if (stop.stationName && stop.stationCode) {
+                    map.set(stop.stationName, stop.stationCode);
+                }
+            });
+        });
+        return map;
+    }, [itineraryByTripId]);
+
     const priceBounds = useMemo(() => {
         const prices = trips.map(getTripPrice).filter((price) => price > 0);
         return {
@@ -741,6 +1329,16 @@ const Schedules: React.FC = () => {
             max: prices.length ? Math.max(...prices) : 0,
         };
     }, [trips]);
+
+    const trainTypeOptions = useMemo(
+        () => buildTrainTypeOptions(trainCategories, trips),
+        [trainCategories, trips],
+    );
+
+    const seatTypeOptions = useMemo(
+        () => buildSeatTypeOptions(trips),
+        [trips],
+    );
 
     const updateParams = (updates: Record<string, string | number | null>) => {
         const next = new URLSearchParams(searchParams);
@@ -753,11 +1351,65 @@ const Schedules: React.FC = () => {
                 (key === 'ticketType' && value === 'one-way') ||
                 (key === 'passengers' && value === '1');
 
-            if (shouldDelete) next.delete(key);
-            else next.set(key, value);
+            deleteQueryKey(next, key);
+            if (!shouldDelete) next.set(key, value);
         });
 
         setSearchParams(next);
+    };
+
+    const updateSearchLinkParams = (updates: Partial<{
+        departure: string;
+        arrival: string;
+        date: string;
+        returnDate: string;
+        ticketType: string;
+        passengerCounts: PassengerCounts;
+    }>) => {
+        const nextValues = {
+            departure: values.departure,
+            arrival: values.arrival,
+            date: values.date || toDateValueFromDate(new Date()),
+            returnDate: values.returnDate,
+            ticketType: values.ticketType,
+            passengerCounts: values.passengerCounts,
+            ...updates,
+        };
+        if (nextValues.ticketType !== 'round-trip' && updates.date && updates.returnDate === undefined) {
+            nextValues.returnDate = updates.date;
+        }
+        const counts = normalizePassengerCounts(nextValues.passengerCounts);
+        const next = new URLSearchParams(searchParams);
+
+        ['departure', 'arrival', 'date', 'ticketType', 'passengers', 'passenger_adult', 'passenger_child', 'passenger_senior', 'passenger_student'].forEach((key) => {
+            deleteQueryKey(next, key);
+        });
+
+        if (nextValues.departure) {
+            next.set('departPlaceName', nextValues.departure);
+            const code = stationCodeByName.get(nextValues.departure);
+            if (code) next.set('departPlaceCode', code);
+        }
+        if (nextValues.arrival) {
+            next.set('returnPlaceName', nextValues.arrival);
+            const code = stationCodeByName.get(nextValues.arrival);
+            if (code) next.set('returnPlaceCode', code);
+        }
+        if (nextValues.date) next.set('departDate', nextValues.date);
+        next.set('returnDate', nextValues.ticketType === 'round-trip' ? (nextValues.returnDate || nextValues.date) : (nextValues.returnDate || nextValues.date));
+        next.set('roundTrip', String(nextValues.ticketType === 'round-trip'));
+        next.set('adults', String(counts.adult));
+        if (counts.child) next.set('childs', String(counts.child));
+        if (counts.senior) next.set('elderlys', String(counts.senior));
+        if (counts.student) next.set('students', String(counts.student));
+        next.set('totalTicket', String(counts.total));
+
+        setSearchParams(next);
+    };
+
+    const updatePassengerCounts = (counts: PassengerCounts) => {
+        const normalized = normalizePassengerCounts(counts);
+        updateSearchLinkParams({ passengerCounts: normalized });
     };
 
     const clearFilters = () => {
@@ -846,7 +1498,7 @@ const Schedules: React.FC = () => {
         if (values.date) {
             chips.push({
                 key: 'date',
-                label: new Date(values.date).toLocaleDateString('vi-VN'),
+                label: formatDateRailDay(values.date),
                 remove: () => updateParams({ date: null }),
             });
         }
@@ -854,7 +1506,7 @@ const Schedules: React.FC = () => {
         if (values.ticketType === 'round-trip' && values.returnDate) {
             chips.push({
                 key: 'returnDate',
-                label: `Ngày về ${new Date(values.returnDate).toLocaleDateString('vi-VN')}`,
+                label: `Ngày về ${formatDateRailDay(values.returnDate)}`,
                 remove: () => updateParams({ returnDate: null }),
             });
         }
@@ -862,8 +1514,14 @@ const Schedules: React.FC = () => {
         if (searchParams.has('passengers') || values.passengers > 1) {
             chips.push({
                 key: 'passengers',
-                label: `${values.passengers} hành khách`,
-                remove: () => updateParams({ passengers: null }),
+                label: `${values.passengers} vé`,
+                remove: () => updateParams({
+                    passengers: null,
+                    passenger_adult: null,
+                    passenger_child: null,
+                    passenger_senior: null,
+                    passenger_student: null,
+                }),
             });
         }
 
@@ -876,8 +1534,8 @@ const Schedules: React.FC = () => {
         }
 
         if (values.timeWindow) chips.push({ key: 'time', label: getLabel(TIME_WINDOWS, values.timeWindow), remove: () => updateParams({ time: null }) });
-        if (values.trainType) chips.push({ key: 'trainType', label: getLabel(TRAIN_TYPES, values.trainType), remove: () => updateParams({ trainType: null }) });
-        if (values.seatType) chips.push({ key: 'seatType', label: getLabel(SEAT_TYPES, values.seatType), remove: () => updateParams({ seatType: null }) });
+        if (values.trainType) chips.push({ key: 'trainType', label: getLabel(trainTypeOptions, values.trainType), remove: () => updateParams({ trainType: null }) });
+        if (values.seatType) chips.push({ key: 'seatType', label: getLabel(seatTypeOptions, values.seatType), remove: () => updateParams({ seatType: null }) });
         if (values.ticketStatus) chips.push({ key: 'ticketStatus', label: getLabel(TICKET_STATUSES, values.ticketStatus), remove: () => updateParams({ ticketStatus: null }) });
         if (values.duration) chips.push({ key: 'duration', label: getLabel(DURATION_FILTERS, values.duration), remove: () => updateParams({ duration: null }) });
         if (values.upcoming) chips.push({ key: 'upcoming', label: 'Chuyáº¿n sáº¯p cháº¡y', remove: () => updateParams({ upcoming: null }) });
@@ -891,7 +1549,7 @@ const Schedules: React.FC = () => {
         if (values.promo) chips.push({ key: 'promo', label: `Mã ${values.promo}`, remove: () => updateParams({ promoCode: null, promo: null }) });
 
         return chips;
-    }, [queryString, searchParams, values, priceBounds]);
+    }, [queryString, searchParams, values, priceBounds, seatTypeOptions, trainTypeOptions]);
 
     const totalPages = Math.max(1, Math.ceil(filteredTrips.length / ITEMS_PER_PAGE));
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -931,83 +1589,67 @@ const Schedules: React.FC = () => {
                     </div>
                 </div>
 
-                <div className="sticky top-[72px] z-30 border-y border-gray-100 bg-white/95 backdrop-blur-xl">
-                    <div className="mx-auto max-w-7xl px-4 py-4 md:px-12">
+                <div className="sticky top-[72px] z-30 border-y border-gray-200 bg-[#eef4f7]/95 backdrop-blur-xl">
+                    <div className="mx-auto max-w-[86rem] px-4 py-3 md:px-12">
                         <div className={cn(
-                            "grid gap-3 lg:items-end",
+                            "grid gap-3 rounded-md bg-[#d8d8d8] p-3 shadow-sm lg:items-end",
                             values.ticketType === 'round-trip'
-                                ? "lg:grid-cols-[1.1fr_1.1fr_0.9fr_0.9fr_0.7fr_0.9fr_auto]"
-                                : "lg:grid-cols-[1.2fr_1.2fr_0.9fr_0.7fr_0.9fr_auto]"
+                                ? "lg:grid-cols-[1.05fr_1.05fr_0.85fr_0.85fr_1fr_0.85fr_auto_auto]"
+                                : "lg:grid-cols-[1.2fr_1.2fr_0.9fr_1fr_0.9fr_auto_auto]"
                         )}>
                             <SelectField
                                 icon={MapPin}
                                 label="Ga đi"
                                 value={values.departure}
-                                onChange={(value) => updateParams({ departure: value })}
+                                onChange={(value) => updateSearchLinkParams({ departure: value })}
                                 options={[{ value: '', label: 'Tất cả ga đi' }, ...stationOptions.map((station) => ({ value: station, label: station }))]}
                             />
                             <SelectField
                                 icon={MapPin}
                                 label="Ga đến"
                                 value={values.arrival}
-                                onChange={(value) => updateParams({ arrival: value })}
+                                onChange={(value) => updateSearchLinkParams({ arrival: value })}
                                 options={[{ value: '', label: 'Tất cả ga đến' }, ...stationOptions.map((station) => ({ value: station, label: station }))]}
                             />
-                            <label className="space-y-1.5">
-                                <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
-                                    <CalendarDays size={12} className="text-tet-red" />
-                                    Ngày đi
-                                </span>
-                                <input
-                                    type="date"
-                                    value={values.date}
-                                    onChange={(event) => updateParams({ date: event.target.value })}
-                                    className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-100"
-                                />
-                            </label>
+                            <DatePickerField
+                                label="Ngày đi"
+                                value={values.date}
+                                onChange={(value) => updateSearchLinkParams({ date: value })}
+                            />
                             {values.ticketType === 'round-trip' && (
-                                <label className="space-y-1.5">
-                                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
-                                        <CalendarDays size={12} className="text-tet-red" />
-                                        Ngày về
-                                    </span>
-                                    <input
-                                        type="date"
-                                        min={values.date || undefined}
-                                        value={values.returnDate}
-                                        onChange={(event) => updateParams({ returnDate: event.target.value })}
-                                        className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-100"
-                                    />
-                                </label>
-                            )}
-                            <label className="space-y-1.5">
-                                <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-gray-500">
-                                    <Users size={12} className="text-tet-red" />
-                                    Hành khách
-                                </span>
-                                <input
-                                    type="number"
-                                    min={1}
-                                    max={10}
-                                    value={values.passengers}
-                                    onChange={(event) => updateParams({ passengers: Math.max(1, Number(event.target.value) || 1) })}
-                                    className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-center text-sm font-black text-gray-900 outline-none transition focus:border-tet-red focus:ring-4 focus:ring-red-100"
+                                <DatePickerField
+                                    label="Ngày về"
+                                    min={values.date || undefined}
+                                    value={values.returnDate}
+                                    placeholder="Chọn nếu mua vé về"
+                                    onChange={(value) => updateSearchLinkParams({ returnDate: value })}
                                 />
-                            </label>
+                            )}
+                            <PassengerPickerField
+                                value={values.passengerCounts}
+                                onChange={updatePassengerCounts}
+                            />
                             <SelectField
                                 icon={Ticket}
                                 label="Loại vé"
                                 value={values.ticketType}
-                                onChange={(value) => updateParams({
+                                onChange={(value) => updateSearchLinkParams({
                                     ticketType: value,
-                                    returnDate: value === 'round-trip' ? (values.returnDate || values.date) : null,
+                                    returnDate: value === 'round-trip' ? (values.returnDate || values.date) : '',
                                 })}
                                 options={TICKET_TYPES}
                             />
+                            <button
+                                type="button"
+                                onClick={() => updateSearchLinkParams({})}
+                                className="hidden h-11 items-center justify-center rounded-xl bg-[#ff8900] px-7 text-sm font-black text-white shadow-sm transition hover:bg-[#f07f00] lg:inline-flex"
+                            >
+                                Tìm
+                            </button>
                             <div className="flex gap-2">
                                 <button
                                     type="button"
-                                    onClick={() => updateParams({ departure: values.arrival, arrival: values.departure })}
+                                    onClick={() => updateSearchLinkParams({ departure: values.arrival, arrival: values.departure })}
                                     className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-500 transition hover:border-tet-red hover:text-tet-red lg:inline-flex"
                                     aria-label="Đổi chiều tuyến"
                                 >
@@ -1026,13 +1668,29 @@ const Schedules: React.FC = () => {
                         </div>
                     </div>
                 </div>
+
+                <div className="mx-auto max-w-[86rem] px-4 pt-6 md:px-12">
+                    <DateRail
+                        date={values.date}
+                        departure={values.departure}
+                        arrival={values.arrival}
+                        onChange={(nextDate) => updateSearchLinkParams({ date: nextDate })}
+                    />
+                </div>
             </section>
 
             <section className="py-8 md:py-10">
-                <div className="mx-auto grid max-w-7xl gap-6 px-4 md:px-12 lg:grid-cols-[300px_1fr]">
+                <div className="mx-auto grid max-w-[86rem] gap-6 px-4 md:px-12 lg:grid-cols-[300px_1fr]">
                     <aside className="hidden lg:block">
                         <div className="sticky top-36 max-h-[calc(100vh-10rem)] overflow-y-auto overscroll-contain rounded-2xl border border-gray-100 bg-white p-5 pr-4 shadow-sm [scrollbar-width:thin] [scrollbar-color:#D32F2F_#F3F4F6] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-tet-red/70">
-                            <ScheduleFilterPanel values={values} updateParams={updateParams} clearFilters={clearFilters} activeCount={activeFilterCount} />
+                            <ScheduleFilterPanel
+                                values={values}
+                                updateParams={updateParams}
+                                clearFilters={clearFilters}
+                                activeCount={activeFilterCount}
+                                trainTypeOptions={trainTypeOptions}
+                                seatTypeOptions={seatTypeOptions}
+                            />
                         </div>
                     </aside>
 
@@ -1129,6 +1787,10 @@ const Schedules: React.FC = () => {
                                             key={trip.id}
                                             trip={trip}
                                             passengers={values.passengers}
+                                            passengerCounts={values.passengerCounts}
+                                            date={values.date}
+                                            returnDate={values.returnDate}
+                                            ticketType={values.ticketType}
                                             promoCode={values.promo}
                                             routeSelection={resolveRouteSelection(trip, itineraryByTripId.get(trip.id), values.departure, values.arrival)}
                                         />
@@ -1208,7 +1870,14 @@ const Schedules: React.FC = () => {
                                     <X size={18} />
                                 </button>
                             </div>
-                            <ScheduleFilterPanel values={values} updateParams={updateParams} clearFilters={clearFilters} activeCount={activeFilterCount} />
+                            <ScheduleFilterPanel
+                                values={values}
+                                updateParams={updateParams}
+                                clearFilters={clearFilters}
+                                activeCount={activeFilterCount}
+                                trainTypeOptions={trainTypeOptions}
+                                seatTypeOptions={seatTypeOptions}
+                            />
                         </motion.div>
                     </motion.div>
                 )}

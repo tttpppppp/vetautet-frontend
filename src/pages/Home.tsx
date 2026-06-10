@@ -1,6 +1,7 @@
 import React from 'react';
 import Header from '@/components/Header';
 import HeroSection from '@/components/HeroSection';
+import RouteMapSection from '@/components/RouteMapSection';
 import TodaySchedules from '@/components/TodaySchedules';
 import TicketList from '@/components/TicketList.tsx';
 import ReasonsToBookSection from '@/components/ReasonsToBookSection';
@@ -25,6 +26,9 @@ const Home: React.FC = () => {
 
             {/* Hero & Search Combined for Layout */}
             <HeroSection />
+
+            {/* Vietnam railway route map */}
+            <RouteMapSection />
 
             {/* Today's live schedules */}
             <TodaySchedules />

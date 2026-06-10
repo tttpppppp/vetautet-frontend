@@ -24,17 +24,26 @@ import Footer from '@/components/Footer';
 import { cn } from '@/lib/utils';
 import { adminApi } from '../api/admin.api';
 import { useAuthStore } from '../store/useAuthStore';
-import { TripSegmentPriceRequest, TripStopRequest } from '../types/api.types';
+import { AdminPurchaseStats, AdminRouteStats, AdminStatusCount, AdminTimeSeriesStats, PassengerFareRuleRequest, TripSegmentPriceRequest, TripStopRequest } from '../types/api.types';
 
 const bookingStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'EXPIRED'];
 const ticketStatuses = ['AVAILABLE', 'HOLD', 'BOOKED'];
 const commonStatuses = ['ACTIVE', 'INACTIVE'];
 const promotionStatuses = ['ACTIVE', 'INACTIVE', 'EXPIRING'];
 
+type AnalyticsPeriod = 'day' | 'month' | 'year';
+
+const analyticsPeriodOptions: Array<{ id: AnalyticsPeriod; label: string; title: string }> = [
+    { id: 'day', label: 'Ngay', title: 'ngay' },
+    { id: 'month', label: 'Thang', title: 'thang' },
+    { id: 'year', label: 'Nam', title: 'nam' },
+];
+
 const tabs = [
     { id: 'stats', label: 'Thống kê', icon: BarChart3, meta: 'Dashboard tổng quan' },
     { id: 'bookings', label: 'Bookings', icon: Ticket },
     { id: 'promotions', label: 'Promotions', icon: Percent },
+    { id: 'fare-rules', label: 'Gia doi tuong', icon: Percent, meta: 'Bang gia theo do tuoi/doi tuong' },
     { id: 'stations', label: 'Stations', icon: Warehouse },
     { id: 'tickets', label: 'Tickets', icon: Ticket },
     { id: 'trains', label: 'Trains', icon: Train },
@@ -94,6 +103,27 @@ const initialPromotion = {
     status: 'ACTIVE',
 };
 
+type PassengerFareRuleForm = {
+    id?: number;
+    passengerType: string;
+    label: string;
+    minAge: string;
+    maxAge: string;
+    discountPercent: string;
+    fareMultiplier: string;
+    verificationRequired: boolean;
+    description: string;
+    sortOrder: string;
+    status: string;
+};
+
+const initialPassengerFareRules: PassengerFareRuleForm[] = [
+    { passengerType: 'ADULT', label: 'Nguoi lon', minAge: '10', maxAge: '59', discountPercent: '0', fareMultiplier: '1', verificationRequired: false, description: 'Nguoi lon tu 10 - 59 tuoi.', sortOrder: '1', status: 'ACTIVE' },
+    { passengerType: 'CHILD', label: 'Tre em', minAge: '6', maxAge: '9', discountPercent: '25', fareMultiplier: '0.75', verificationRequired: false, description: 'Tre em tu 6 - 9 tuoi duoc giam 25%.', sortOrder: '2', status: 'ACTIVE' },
+    { passengerType: 'SENIOR', label: 'Nguoi cao tuoi', minAge: '60', maxAge: '', discountPercent: '15', fareMultiplier: '0.85', verificationRequired: true, description: 'Cong dan Viet Nam tu 60 tuoi duoc giam 15%.', sortOrder: '3', status: 'ACTIVE' },
+    { passengerType: 'STUDENT', label: 'Sinh vien', minAge: '', maxAge: '', discountPercent: '10', fareMultiplier: '0.9', verificationRequired: true, description: 'Sinh vien co the sinh vien hop le duoc giam 10%.', sortOrder: '4', status: 'ACTIVE' },
+];
+
 const formatMoney = (value: unknown) => `${Number(value || 0).toLocaleString('vi-VN')}đ`;
 
 const formatDateTime = (value: unknown) => {
@@ -124,6 +154,34 @@ const toNullableNumber = (value: string) => {
     const trimmed = String(value || '').trim();
     return trimmed ? Number(trimmed) : null;
 };
+
+const toPassengerFareRuleForm = (rule: any): PassengerFareRuleForm => ({
+    id: rule.id,
+    passengerType: rule.passengerType || 'ADULT',
+    label: rule.label || '',
+    minAge: rule.minAge == null ? '' : String(rule.minAge),
+    maxAge: rule.maxAge == null ? '' : String(rule.maxAge),
+    discountPercent: rule.discountPercent == null ? '0' : String(rule.discountPercent),
+    fareMultiplier: rule.fareMultiplier == null ? '1' : String(rule.fareMultiplier),
+    verificationRequired: Boolean(rule.verificationRequired),
+    description: rule.description || '',
+    sortOrder: rule.sortOrder == null ? '0' : String(rule.sortOrder),
+    status: rule.status || 'ACTIVE',
+});
+
+const toPassengerFareRulePayload = (rule: PassengerFareRuleForm): PassengerFareRuleRequest => ({
+    id: rule.id,
+    passengerType: rule.passengerType.trim().toUpperCase(),
+    label: rule.label.trim(),
+    minAge: toNullableNumber(rule.minAge),
+    maxAge: toNullableNumber(rule.maxAge),
+    discountPercent: Number(rule.discountPercent || 0),
+    fareMultiplier: Number(rule.fareMultiplier || 1),
+    verificationRequired: rule.verificationRequired,
+    description: rule.description,
+    sortOrder: Number(rule.sortOrder || 0),
+    status: rule.status || 'ACTIVE',
+});
 
 const getItemId = (item: any) => Number(item?.id ?? item?.bookingId ?? item?.ticketId);
 
@@ -280,12 +338,249 @@ const StatCard = ({
     );
 };
 
+type ChartDatum = {
+    label: string;
+    value: number;
+    note?: string;
+    color?: string;
+};
+
+const CHART_COLORS = ['#dc2626', '#16a34a', '#2563eb', '#f59e0b', '#111827', '#7c3aed'];
+
+const toChartNumber = (value: unknown) => {
+    const parsed = Number(value || 0);
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const statusChartColor = (status: string, index: number) => {
+    const normalized = String(status || '').toUpperCase();
+    if (['CONFIRMED', 'PAID', 'SUCCESS', 'COMPLETED'].includes(normalized)) return '#16a34a';
+    if (['PENDING', 'AWAITING_PAYMENT', 'HOLD', 'QUEUED'].includes(normalized)) return '#f59e0b';
+    if (['CANCELLED', 'CANCELED', 'EXPIRED', 'FAILED'].includes(normalized)) return '#6b7280';
+    return CHART_COLORS[index % CHART_COLORS.length];
+};
+
+const ChartPanel = ({
+    title,
+    eyebrow,
+    Icon,
+    actions,
+    children,
+}: {
+    title: string;
+    eyebrow: string;
+    Icon: React.ElementType;
+    actions?: React.ReactNode;
+    children: React.ReactNode;
+}) => (
+    <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
+        <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.25em] text-tet-red">{eyebrow}</p>
+                <h3 className="mt-1 text-xl font-black text-gray-950">{title}</h3>
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+                {actions}
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gray-50 text-gray-400">
+                    <Icon size={20} />
+                </div>
+            </div>
+        </div>
+        {children}
+    </div>
+);
+
+const ColumnChart = ({
+    data,
+    empty,
+    valueFormatter = (value: number) => value.toLocaleString('vi-VN'),
+}: {
+    data: ChartDatum[];
+    empty?: React.ReactNode;
+    valueFormatter?: (value: number) => string;
+}) => {
+    const maxValue = Math.max(...data.map(item => item.value), 0);
+
+    if (!data.length || maxValue <= 0) {
+        return <>{empty || <EmptyState />}</>;
+    }
+
+    const chartWidth = 680;
+    const chartHeight = 300;
+    const plot = { left: 54, top: 20, right: 24, bottom: 64 };
+    const plotWidth = chartWidth - plot.left - plot.right;
+    const plotHeight = chartHeight - plot.top - plot.bottom;
+    const slotWidth = plotWidth / data.length;
+    const barWidth = Math.max(28, Math.min(72, slotWidth * 0.52));
+    const roundedMax = Math.max(1, Math.ceil(maxValue / 5) * 5);
+    const gridTicks = [0, 0.25, 0.5, 0.75, 1];
+
+    return (
+        <div className="space-y-4">
+            <div className="overflow-x-auto">
+                <svg
+                    viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+                    className="h-[300px] min-w-[640px] w-full"
+                    role="img"
+                    aria-label="Admin statistics column chart"
+                >
+                    {gridTicks.map((tick) => {
+                        const y = plot.top + plotHeight - tick * plotHeight;
+                        const tickValue = Math.round(roundedMax * tick);
+                        return (
+                            <g key={tick}>
+                                <line
+                                    x1={plot.left}
+                                    x2={chartWidth - plot.right}
+                                    y1={y}
+                                    y2={y}
+                                    stroke="#edf0f4"
+                                    strokeWidth="1"
+                                />
+                                <text
+                                    x={plot.left - 12}
+                                    y={y + 4}
+                                    textAnchor="end"
+                                    className="fill-gray-400 text-[10px] font-bold"
+                                >
+                                    {tickValue.toLocaleString('vi-VN')}
+                                </text>
+                            </g>
+                        );
+                    })}
+
+                    <line
+                        x1={plot.left}
+                        x2={chartWidth - plot.right}
+                        y1={plot.top + plotHeight}
+                        y2={plot.top + plotHeight}
+                        stroke="#d8dde6"
+                        strokeWidth="1.5"
+                    />
+                    <line
+                        x1={plot.left}
+                        x2={plot.left}
+                        y1={plot.top}
+                        y2={plot.top + plotHeight}
+                        stroke="#d8dde6"
+                        strokeWidth="1.5"
+                    />
+
+                    {data.map((item, index) => {
+                        const color = item.color || CHART_COLORS[index % CHART_COLORS.length];
+                        const barHeight = Math.max(4, (item.value / roundedMax) * plotHeight);
+                        const x = plot.left + slotWidth * index + (slotWidth - barWidth) / 2;
+                        const y = plot.top + plotHeight - barHeight;
+                        const shortLabel = data.length > 4 || item.label.length > 12 ? `#${index + 1}` : item.label;
+
+                        return (
+                            <g key={item.label}>
+                                <rect
+                                    x={x}
+                                    y={y}
+                                    width={barWidth}
+                                    height={barHeight}
+                                    rx="9"
+                                    fill={color}
+                                />
+                                <text
+                                    x={x + barWidth / 2}
+                                    y={y - 8}
+                                    textAnchor="middle"
+                                    className="fill-gray-950 text-[11px] font-black"
+                                >
+                                    {valueFormatter(item.value)}
+                                </text>
+                                <text
+                                    x={x + barWidth / 2}
+                                    y={plot.top + plotHeight + 28}
+                                    textAnchor="middle"
+                                    className="fill-gray-500 text-[10px] font-black uppercase"
+                                >
+                                    {shortLabel}
+                                </text>
+                            </g>
+                        );
+                    })}
+                </svg>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                {data.map((item, index) => (
+                    <div key={item.label} className="flex items-start gap-2 rounded-xl bg-gray-50 px-3 py-2">
+                        <span
+                            className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: item.color || CHART_COLORS[index % CHART_COLORS.length] }}
+                        />
+                        <div className="min-w-0">
+                            <p className="truncate text-[10px] font-black uppercase tracking-widest text-gray-700">
+                                {data.length > 4 ? `#${index + 1} ` : ''}{item.label}
+                            </p>
+                            {item.note && <p className="mt-0.5 text-[10px] font-bold text-gray-400">{item.note}</p>}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const SeatOccupancyChart = ({
+    availableSeats,
+    occupiedSeats,
+    totalSeats,
+}: {
+    availableSeats: number;
+    occupiedSeats: number;
+    totalSeats: number;
+}) => {
+    const total = totalSeats || availableSeats + occupiedSeats;
+    const occupiedPercent = total > 0 ? Math.round((occupiedSeats / total) * 100) : 0;
+    const availablePercent = total > 0 ? Math.round((availableSeats / total) * 100) : 0;
+
+    return (
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
+            <div
+                className="relative mx-auto flex h-40 w-40 shrink-0 items-center justify-center rounded-full"
+                style={{
+                    background: `conic-gradient(#16a34a 0 ${occupiedPercent}%, #e5e7eb ${occupiedPercent}% 100%)`,
+                }}
+            >
+                <div className="flex h-28 w-28 flex-col items-center justify-center rounded-full bg-white shadow-inner">
+                    <p className="text-3xl font-black text-gray-950">{occupiedPercent}%</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Da giu/ban</p>
+                </div>
+            </div>
+            <div className="flex-1 space-y-3">
+                {[
+                    ['Da giu/ban', occupiedSeats, occupiedPercent, 'bg-green-600'],
+                    ['Con trong', availableSeats, availablePercent, 'bg-gray-300'],
+                ].map(([label, value, percent, tone]) => (
+                    <div key={String(label)} className="rounded-xl bg-gray-50 px-4 py-3">
+                        <div className="mb-2 flex items-center justify-between">
+                            <span className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-widest text-gray-500">
+                                <span className={cn('h-2.5 w-2.5 rounded-full', tone)} />
+                                {label}
+                            </span>
+                            <span className="text-sm font-black text-gray-950">{Number(value).toLocaleString('vi-VN')}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-white">
+                            <div className={cn('h-full rounded-full', tone)} style={{ width: `${percent}%` }} />
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
 const Admin = () => {
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const { user, isAuthenticated, fetchUser } = useAuthStore();
 
     const [activeTab, setActiveTab] = useState('stats');
+    const [analyticsPeriod, setAnalyticsPeriod] = useState<AnalyticsPeriod>('month');
     const [editing, setEditing] = useState<{ type: string; id: number | string } | null>(null);
     const [bookingStatus, setBookingStatus] = useState<Record<number, string>>({});
     const [promotionFilters, setPromotionFilters] = useState({ q: '', status: '', sort: 'newest', route: '', discount: '', type: '', category: '' });
@@ -300,6 +595,7 @@ const Admin = () => {
     const [ticketForm, setTicketForm] = useState(initialTicket);
     const [userForm, setUserForm] = useState(initialUser);
     const [promotionForm, setPromotionForm] = useState(initialPromotion);
+    const [passengerFareRulesForm, setPassengerFareRulesForm] = useState<PassengerFareRuleForm[]>(initialPassengerFareRules);
 
     useEffect(() => {
         if (isAuthenticated && (!user || !user.roles)) fetchUser();
@@ -317,6 +613,11 @@ const Admin = () => {
             discount: promotionFilters.discount ? Number(promotionFilters.discount) : undefined,
         }),
         enabled: activeTab === 'promotions' && isAdmin,
+    });
+    const passengerFareRulesQuery = useQuery({
+        queryKey: ['admin', 'passenger-fare-rules'],
+        queryFn: adminApi.getPassengerFareRules,
+        enabled: activeTab === 'fare-rules' && isAdmin,
     });
     const stationsQuery = useQuery({ queryKey: ['admin', 'stations'], queryFn: adminApi.getStations, enabled: ['stations', 'segments'].includes(activeTab) && isAdmin });
     const trainsQuery = useQuery({ queryKey: ['admin', 'trains'], queryFn: adminApi.getTrains, enabled: activeTab === 'trains' && isAdmin });
@@ -453,6 +754,19 @@ const Admin = () => {
     });
     const deletePromotionMutation = useMutation({ mutationFn: adminApi.deletePromotion, onSuccess: () => invalidate('promotions') });
 
+    const savePassengerFareRulesMutation = useMutation({
+        mutationFn: () => adminApi.updatePassengerFareRules({
+            rules: passengerFareRulesForm
+                .filter((rule) => rule.passengerType.trim() && rule.label.trim())
+                .map(toPassengerFareRulePayload),
+        }),
+        onSuccess: (rules) => {
+            setPassengerFareRulesForm(rules.length ? rules.map(toPassengerFareRuleForm) : initialPassengerFareRules);
+            invalidate('passenger-fare-rules');
+            queryClient.invalidateQueries({ queryKey: ['passenger-fare-rules'] });
+        },
+    });
+
     const saveTicketMutation = useMutation({
         mutationFn: () => adminApi.updateTicket(Number(editing?.id), {
             price: Number(ticketForm.price || 0),
@@ -484,13 +798,14 @@ const Admin = () => {
         stats: statsQuery,
         bookings: bookingsQuery,
         promotions: promotionsQuery,
+        'fare-rules': passengerFareRulesQuery,
         stations: stationsQuery,
         tickets: ticketsQuery,
         trains: trainsQuery,
         trips: tripsQuery,
         segments: tripItineraryQuery,
         users: usersQuery,
-    }[activeTab]), [activeTab, bookingsQuery, promotionsQuery, stationsQuery, statsQuery, ticketsQuery, trainsQuery, tripsQuery, tripItineraryQuery, usersQuery]);
+    }[activeTab]), [activeTab, bookingsQuery, passengerFareRulesQuery, promotionsQuery, stationsQuery, statsQuery, ticketsQuery, trainsQuery, tripsQuery, tripItineraryQuery, usersQuery]);
 
     useEffect(() => {
         const itinerary = tripItineraryQuery.data;
@@ -523,6 +838,14 @@ const Admin = () => {
             effectiveTo: toLocalDateTimeInput(price.effectiveTo || undefined),
         })) : [initialSegmentPrice()]);
     }, [tripItineraryQuery.data]);
+
+    useEffect(() => {
+        if (activeTab !== 'fare-rules') return;
+        const rules = passengerFareRulesQuery.data || [];
+        if (rules.length) {
+            setPassengerFareRulesForm(rules.map(toPassengerFareRuleForm));
+        }
+    }, [activeTab, passengerFareRulesQuery.data]);
 
     const refreshActivePanel = () => {
         if (activeTab === 'stats') {
@@ -577,7 +900,42 @@ const Admin = () => {
         const stats = statsQuery.data;
         const routeStats = stats?.topRoutes || [];
         const bookingStatusCounts = stats?.bookingStatusCounts || [];
+        const periodMeta = analyticsPeriodOptions.find((option) => option.id === analyticsPeriod) || analyticsPeriodOptions[1];
+        const bookingSeriesByPeriod: Record<AnalyticsPeriod, AdminTimeSeriesStats[]> = {
+            day: stats?.dailyBookings || [],
+            month: stats?.monthlyBookings || [],
+            year: stats?.yearlyBookings || [],
+        };
         const isStatsLoading = statsQuery.isLoading;
+        const bookingStatusChartData = bookingStatusCounts.map((item: AdminStatusCount, index: number) => ({
+            label: item.status || '--',
+            value: toChartNumber(item.count),
+            color: statusChartColor(item.status, index),
+        }));
+        const routeChartData = routeStats.slice(0, 6).map((route: AdminRouteStats, index: number) => ({
+            label: route.route || `${route.departureStation} - ${route.arrivalStation}`,
+            value: toChartNumber(route.tripsCount),
+            note: `${toChartNumber(route.availableSeats).toLocaleString('vi-VN')} ghe trong${route.minPrice ? ` - tu ${formatMoney(route.minPrice)}` : ''}`,
+            color: CHART_COLORS[index % CHART_COLORS.length],
+        }));
+        const bookingTrendChartData = bookingSeriesByPeriod[analyticsPeriod].map((item: AdminTimeSeriesStats, index: number) => ({
+            label: item.label || item.period || '--',
+            value: toChartNumber(item.count),
+            note: `${formatMoney(item.revenue || 0)} doanh thu`,
+            color: CHART_COLORS[index % CHART_COLORS.length],
+        }));
+        const topPurchasedTrainChartData = (stats?.topPurchasedTrains || []).map((item: AdminPurchaseStats, index: number) => ({
+            label: item.name || '--',
+            value: toChartNumber(item.count),
+            note: `${formatMoney(item.revenue || 0)} doanh thu`,
+            color: CHART_COLORS[index % CHART_COLORS.length],
+        }));
+        const topPurchasedSeatTypeChartData = (stats?.topPurchasedSeatTypes || []).map((item: AdminPurchaseStats, index: number) => ({
+            label: item.name || '--',
+            value: toChartNumber(item.count),
+            note: `${formatMoney(item.revenue || 0)} doanh thu`,
+            color: CHART_COLORS[index % CHART_COLORS.length],
+        }));
         return (
             <div className="space-y-7">
                 {isStatsLoading && (
@@ -591,6 +949,78 @@ const Admin = () => {
                     <StatCard label="Booking chờ xử lý" value={stats?.pendingBookings || 0} note={`${stats?.totalBookings || 0} booking tổng cộng`} Icon={LoaderCircle} tone="amber" />
                     <StatCard label="Chuyến đang mở" value={stats?.activeTrips || 0} note={`${stats?.totalTrips || 0} chuyến trong hệ thống`} Icon={CalendarClock} tone="blue" />
                     <StatCard label="Ghế đã giữ/bán" value={stats?.occupiedSeats || 0} note={`${stats?.availableSeats || 0}/${stats?.totalSeats || 0} ghế còn trống`} Icon={Train} tone="green" />
+                </div>
+
+                <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+                    <ChartPanel eyebrow="Booking chart" title="Phan bo trang thai don" Icon={BarChart3}>
+                        <ColumnChart
+                            data={bookingStatusChartData}
+                            empty={<EmptyState isLoading={statsQuery.isLoading} isError={statsQuery.isError} />}
+                        />
+                    </ChartPanel>
+
+                    <ChartPanel eyebrow="Seat chart" title="Ty le ghe da giu/ban" Icon={Train}>
+                        <SeatOccupancyChart
+                            availableSeats={toChartNumber(stats?.availableSeats)}
+                            occupiedSeats={toChartNumber(stats?.occupiedSeats)}
+                            totalSeats={toChartNumber(stats?.totalSeats)}
+                        />
+                    </ChartPanel>
+                </div>
+
+                <ChartPanel eyebrow="Route chart" title="Top tuyen theo so chuyen" Icon={Route}>
+                    <ColumnChart
+                        data={routeChartData}
+                        empty={<EmptyState isLoading={statsQuery.isLoading} isError={statsQuery.isError} />}
+                        valueFormatter={(value) => `${value.toLocaleString('vi-VN')} chuyen`}
+                    />
+                </ChartPanel>
+
+                <ChartPanel
+                    eyebrow="Time chart"
+                    title={`Phan tich booking theo ${periodMeta.title}`}
+                    Icon={CalendarClock}
+                    actions={(
+                        <div className="flex rounded-xl bg-gray-50 p-1">
+                            {analyticsPeriodOptions.map((option) => (
+                                <button
+                                    key={option.id}
+                                    type="button"
+                                    onClick={() => setAnalyticsPeriod(option.id)}
+                                    className={cn(
+                                        'h-9 rounded-lg px-3 text-[11px] font-black uppercase tracking-widest transition',
+                                        analyticsPeriod === option.id ? 'bg-white text-tet-red shadow-sm' : 'text-gray-400 hover:text-gray-700'
+                                    )}
+                                >
+                                    {option.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                >
+                    <ColumnChart
+                        data={bookingTrendChartData}
+                        empty={<EmptyState isLoading={statsQuery.isLoading} isError={statsQuery.isError} />}
+                        valueFormatter={(value) => `${value.toLocaleString('vi-VN')} booking`}
+                    />
+                </ChartPanel>
+
+                <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+                    <ChartPanel eyebrow="Train chart" title="Tau duoc mua nhieu" Icon={Train}>
+                        <ColumnChart
+                            data={topPurchasedTrainChartData}
+                            empty={<EmptyState isLoading={statsQuery.isLoading} isError={statsQuery.isError} />}
+                            valueFormatter={(value) => `${value.toLocaleString('vi-VN')} ve`}
+                        />
+                    </ChartPanel>
+
+                    <ChartPanel eyebrow="Seat type chart" title="Loai ghe duoc mua nhieu" Icon={Ticket}>
+                        <ColumnChart
+                            data={topPurchasedSeatTypeChartData}
+                            empty={<EmptyState isLoading={statsQuery.isLoading} isError={statsQuery.isError} />}
+                            valueFormatter={(value) => `${value.toLocaleString('vi-VN')} ve`}
+                        />
+                    </ChartPanel>
                 </div>
 
                 <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
@@ -727,6 +1157,96 @@ const Admin = () => {
             </div>
         </div>
     );
+
+    const renderPassengerFareRules = () => {
+        const updateRule = (index: number, patch: Partial<PassengerFareRuleForm>) => {
+            setPassengerFareRulesForm((prev) => prev.map((rule, itemIndex) => itemIndex === index ? { ...rule, ...patch } : rule));
+        };
+        const addRule = () => {
+            setPassengerFareRulesForm((prev) => [
+                ...prev,
+                {
+                    passengerType: '',
+                    label: '',
+                    minAge: '',
+                    maxAge: '',
+                    discountPercent: '0',
+                    fareMultiplier: '1',
+                    verificationRequired: false,
+                    description: '',
+                    sortOrder: String(prev.length + 1),
+                    status: 'ACTIVE',
+                },
+            ]);
+        };
+        const removeRule = (index: number) => {
+            setPassengerFareRulesForm((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
+        };
+
+        return (
+            <div className="space-y-5">
+                <div className="rounded-2xl border border-red-100 bg-red-50 px-5 py-4">
+                    <p className="text-sm font-black text-gray-950">Bang nay la nguon thong nhat cho gia theo doi tuong.</p>
+                    <p className="mt-1 text-xs font-bold text-gray-500">
+                        Gia thuc te = gia nguoi lon theo chang/toa x he so. Vi du tre em 0.75 tuong ung giam 25%.
+                    </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <ActionButton tone="plain" onClick={addRule}>+ Rule</ActionButton>
+                    <ActionButton
+                        onClick={() => savePassengerFareRulesMutation.mutate()}
+                        disabled={savePassengerFareRulesMutation.isPending || passengerFareRulesForm.some((rule) => !rule.passengerType.trim() || !rule.label.trim())}
+                    >
+                        <Save size={13} /> Luu bang gia
+                    </ActionButton>
+                </div>
+                <TableShell columns={['Type', 'Label', 'Age', '% giam', 'He so', 'Can xac minh', 'Status', 'Mo ta', 'Actions']} empty={passengerFareRulesForm.length === 0 ? <EmptyState isLoading={passengerFareRulesQuery.isLoading} isError={passengerFareRulesQuery.isError} /> : null}>
+                    {passengerFareRulesForm.map((rule, index) => (
+                        <tr key={`${rule.passengerType}-${index}`}>
+                            <td className="px-4 py-4">
+                                <input className="w-28 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold uppercase" value={rule.passengerType} onChange={(event) => updateRule(index, { passengerType: event.target.value.toUpperCase() })} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <input className="w-36 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" value={rule.label} onChange={(event) => updateRule(index, { label: event.target.value })} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <div className="flex gap-2">
+                                    <input className="w-20 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" placeholder="Min" type="number" value={rule.minAge} onChange={(event) => updateRule(index, { minAge: event.target.value })} />
+                                    <input className="w-20 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" placeholder="Max" type="number" value={rule.maxAge} onChange={(event) => updateRule(index, { maxAge: event.target.value })} />
+                                </div>
+                            </td>
+                            <td className="px-4 py-4">
+                                <input className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" type="number" value={rule.discountPercent} onChange={(event) => {
+                                    const discountPercent = event.target.value;
+                                    const multiplier = Math.max(0, 1 - Number(discountPercent || 0) / 100);
+                                    updateRule(index, { discountPercent, fareMultiplier: String(Number(multiplier.toFixed(4))) });
+                                }} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <input className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" type="number" step="0.01" value={rule.fareMultiplier} onChange={(event) => updateRule(index, { fareMultiplier: event.target.value })} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <input type="checkbox" checked={rule.verificationRequired} onChange={(event) => updateRule(index, { verificationRequired: event.target.checked })} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <select className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" value={rule.status} onChange={(event) => updateRule(index, { status: event.target.value })}>
+                                    {commonStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                                </select>
+                            </td>
+                            <td className="px-4 py-4">
+                                <input className="w-64 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold" value={rule.description} onChange={(event) => updateRule(index, { description: event.target.value })} />
+                            </td>
+                            <td className="px-4 py-4">
+                                <ActionButton tone="red" onClick={() => removeRule(index)} disabled={passengerFareRulesForm.length <= 1}>
+                                    <Trash2 size={13} /> Xoa
+                                </ActionButton>
+                            </td>
+                        </tr>
+                    ))}
+                </TableShell>
+            </div>
+        );
+    };
 
     const renderPromotions = () => {
         const rows = promotionsQuery.data || [];
@@ -1153,6 +1673,7 @@ const Admin = () => {
         if (activeTab === 'stats') return renderStats();
         if (activeTab === 'bookings') return renderBookings();
         if (activeTab === 'promotions') return renderPromotions();
+        if (activeTab === 'fare-rules') return renderPassengerFareRules();
         if (activeTab === 'stations') return renderStations();
         if (activeTab === 'tickets') return renderTickets();
         if (activeTab === 'trains') return renderTrains();

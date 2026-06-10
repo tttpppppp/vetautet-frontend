@@ -21,7 +21,7 @@ const DestinationsSection = () => {
 
     const openDestinationSchedules = (stationName) => {
         const params = new URLSearchParams({ arrival: stationName });
-        navigate(`/schedules?${params.toString()}`);
+        navigate(`/search?${params.toString()}`);
     };
 
     return (

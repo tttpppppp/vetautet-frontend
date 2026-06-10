@@ -30,7 +30,7 @@ const UpcomingDeparturesSection = () => {
                             </p>
                         </div>
                         <Link
-                            to="/schedules?upcoming=true&sort=earliest"
+                            to="/search?upcoming=true&sort=earliest"
                             className="inline-flex items-center gap-1.5 self-start rounded-full px-1 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-gray-500 transition-colors hover:text-tet-red md:mt-4"
                         >
                             <CalendarClock size={15} />

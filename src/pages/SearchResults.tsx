@@ -19,7 +19,7 @@ const SearchResults: React.FC = () => {
 
     const queryString = next.toString();
 
-    return <Navigate replace to={`/schedules${queryString ? `?${queryString}` : ''}`} />;
+    return <Navigate replace to={`/search${queryString ? `?${queryString}` : ''}`} />;
 };
 
 export default SearchResults;

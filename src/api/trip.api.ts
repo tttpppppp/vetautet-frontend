@@ -2,6 +2,7 @@ import axiosInstance from './axiosInstance';
 import {
   PopularDestination,
   PopularRoute,
+  PassengerFareRule,
   Trip,
   TripCategory,
   TripFareQuote,
@@ -76,6 +77,11 @@ export const tripApi = {
 
   getTripCategories: async (): Promise<TripCategory[]> => {
     const response = await axiosInstance.get<TripCategory[]>('/trips/categories');
+    return response.data;
+  },
+
+  getPassengerFareRules: async (): Promise<PassengerFareRule[]> => {
+    const response = await axiosInstance.get<PassengerFareRule[]>('/passenger-fare-rules');
     return response.data;
   },
 

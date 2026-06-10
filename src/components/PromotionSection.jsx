@@ -3,6 +3,7 @@ import { ArrowRight, Clock3, MapPin, Train } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { tripApi } from '../api/trip.api';
+import { buildSchedulesParamsFromStoredState } from '../lib/searchState';
 
 const formatPrice = (price) => (price ?? 0).toLocaleString('vi-VN') + 'd';
 
@@ -21,11 +22,12 @@ const PromotionSection = () => {
     });
 
     const openRouteSchedules = (route) => {
-        const params = new URLSearchParams({
+        const params = buildSchedulesParamsFromStoredState({
             departure: route.departureStation,
             arrival: route.arrivalStation,
+            fallbackDate: route.nextDepartureTime,
         });
-        navigate(`/schedules?${params.toString()}`);
+        navigate(`/search?${params.toString()}`);
     };
 
     return (

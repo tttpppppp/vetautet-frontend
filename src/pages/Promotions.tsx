@@ -601,7 +601,7 @@ const Promotions: React.FC = () => {
             if (arrival) params.set('arrival', arrival);
         }
         if (promotion.categories.includes('roundTrip')) params.set('ticketType', 'round-trip');
-        navigate(`/schedules?${params.toString()}`);
+        navigate(`/search?${params.toString()}`);
     };
 
     return (

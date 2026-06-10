@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     ShoppingBag, Search, Calendar, Train, Clock, CheckCircle2,
     XCircle, AlertCircle, Ticket, ArrowRight, Download,
-    ShieldCheck, ReceiptText, QrCode
+    ShieldCheck, ReceiptText, QrCode, CreditCard
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Helmet } from 'react-helmet-async';
@@ -30,8 +30,99 @@ const canDownloadInvoice = (booking) => {
     return bookingStatus === 'CONFIRMED' && (!paymentStatus || paymentStatus === 'SUCCESS');
 };
 
+const canResumePayment = (booking) => {
+    const bookingStatus = String(booking?.status || '').toUpperCase();
+    const paymentStatus = String(booking?.paymentStatus || '').toUpperCase();
+    return ['PENDING', 'AWAITING_PAYMENT', 'ACTIVE'].includes(bookingStatus)
+        && !['SUCCESS', 'PAID', 'CONFIRMED'].includes(paymentStatus);
+};
+
+const resumePaymentPathOf = (booking) => {
+    if (!booking?.tripId || !booking?.bookingId) return '/orders';
+
+    const params = new URLSearchParams({
+        bookingId: String(booking.bookingId),
+        resumePayment: '1',
+    });
+
+    if (booking.departureStationId) {
+        params.set('departureStationId', String(booking.departureStationId));
+    }
+    if (booking.arrivalStationId) {
+        params.set('arrivalStationId', String(booking.arrivalStationId));
+    }
+    if (booking.departureStation) {
+        params.set('departure', booking.departureStation);
+    }
+    if (booking.arrivalStation) {
+        params.set('arrival', booking.arrivalStation);
+    }
+
+    return `/ticket/${booking.tripId}?${params.toString()}`;
+};
+
 const orderCodeOf = (booking) => {
     return booking?.orderNumber || (booking?.bookingId ? `#${booking.bookingId}` : '--');
+};
+
+const PASSENGER_TYPE_LABELS = {
+    ADULT: 'người lớn',
+    CHILD: 'trẻ em',
+    SENIOR: 'người cao tuổi',
+    STUDENT: 'sinh viên',
+};
+
+const normalizePassengerType = (value) => {
+    const normalized = String(value || 'ADULT').trim().toUpperCase();
+    if (['CHILDREN', 'CHILDS', 'KID'].includes(normalized)) return 'CHILD';
+    if (['ELDERLY', 'ELDERLYS', 'SENIORS'].includes(normalized)) return 'SENIOR';
+    if (['STUDENTS'].includes(normalized)) return 'STUDENT';
+    return PASSENGER_TYPE_LABELS[normalized] ? normalized : 'ADULT';
+};
+
+const passengerTypeLabel = (value, capitalize = false) => {
+    const label = PASSENGER_TYPE_LABELS[normalizePassengerType(value)] || PASSENGER_TYPE_LABELS.ADULT;
+    return capitalize ? label.charAt(0).toUpperCase() + label.slice(1) : label;
+};
+
+const passengerTypeSummary = (details = [], fallbackCount = 0) => {
+    const counts = details.reduce((acc, detail) => {
+        const type = normalizePassengerType(detail?.passengerType);
+        acc[type] = (acc[type] || 0) + 1;
+        return acc;
+    }, {});
+
+    const parts = ['ADULT', 'CHILD', 'SENIOR', 'STUDENT']
+        .filter((type) => counts[type] > 0)
+        .map((type) => `${counts[type]} ${PASSENGER_TYPE_LABELS[type]}`);
+
+    if (parts.length) return parts.join(', ');
+    return `${fallbackCount || 0} hành khách`;
+};
+
+const carriageLabelOf = (value) => {
+    if (!value) return 'Chưa rõ toa';
+    const text = String(value).trim();
+    return /^toa\b/i.test(text) ? text : `Toa ${text}`;
+};
+
+const seatPlaceLabel = (detail) => {
+    const seat = detail?.seatNumber ? `Ghế ${detail.seatNumber}` : 'Chưa rõ ghế';
+    return `${carriageLabelOf(detail?.carriageNumber)} - ${seat}`;
+};
+
+const passengerSeatItems = (details = []) => {
+    const counters = {};
+    return details.map((detail) => {
+        const type = normalizePassengerType(detail?.passengerType);
+        counters[type] = (counters[type] || 0) + 1;
+        return {
+            key: detail?.bookingDetailId || detail?.ticketId || `${type}-${counters[type]}`,
+            label: `${passengerTypeLabel(type, true)} ${counters[type]}`,
+            place: seatPlaceLabel(detail),
+            name: detail?.passengerName,
+        };
+    });
 };
 
 const stopArrivalTimeOf = (stop) => (
@@ -321,14 +412,41 @@ const Orders = () => {
                                                     {bookingDetail.paymentStatus}
                                                 </div>
                                             )}
+                                            {canResumePayment(bookingDetail) && (
+                                                <Link
+                                                    to={resumePaymentPathOf(bookingDetail)}
+                                                    className="inline-flex items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-500 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white shadow-lg shadow-emerald-500/20 transition-all hover:bg-emerald-600"
+                                                >
+                                                    <CreditCard size={14} />
+                                                    Thanh toan tiep
+                                                </Link>
+                                            )}
                                         </div>
                                     </div>
 
                                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
                                         <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100">
-                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Ghế</p>
-                                            <p className="text-lg font-black text-gray-900">{bookingDetail.seatNumbers?.join(', ') || '--'}</p>
-                                            <p className="text-sm font-bold text-gray-400 mt-1">{bookingDetail.passengerCount || bookingDetail.details?.length || 0} hành khách</p>
+                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Hành khách & chỗ ngồi</p>
+                                            <p className="text-lg font-black text-gray-900">
+                                                {passengerTypeSummary(bookingDetail.details, bookingDetail.passengerCount)}
+                                            </p>
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                {passengerSeatItems(bookingDetail.details).length ? (
+                                                    passengerSeatItems(bookingDetail.details).map((item) => (
+                                                        <span
+                                                            key={item.key}
+                                                            className="rounded-full border border-red-100 bg-white px-3 py-1 text-[11px] font-black text-gray-700"
+                                                            title={item.name || item.label}
+                                                        >
+                                                            {item.label}: {item.place}
+                                                        </span>
+                                                    ))
+                                                ) : (
+                                                    <span className="text-sm font-bold text-gray-400">
+                                                        {bookingDetail.seatNumbers?.join(', ') || '--'}
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100">
                                             <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Thanh toán</p>
@@ -470,17 +588,19 @@ const Orders = () => {
                                             <h3 className="text-lg font-black text-gray-900">Chi tiết hành khách và vé</h3>
                                         </div>
                                         <div className="space-y-3">
-                                            {bookingDetail.details?.map((detail) => (
+                                            {bookingDetail.details?.map((detail, index) => (
                                                 <div key={detail.bookingDetailId} className="grid grid-cols-1 md:grid-cols-6 gap-4 p-5 rounded-2xl bg-gray-50/70 border border-gray-100 items-center">
                                                     <div>
-                                                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Ghế</p>
-                                                        <p className="text-sm font-black text-gray-900">{detail.seatNumber}</p>
-                                                        <p className="text-xs font-bold text-gray-400 mt-1">{detail.carriageNumber} {detail.carriageTypeName || ''}</p>
+                                                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Chỗ ngồi</p>
+                                                        <p className="text-sm font-black text-gray-900">{seatPlaceLabel(detail)}</p>
+                                                        <p className="text-xs font-bold text-gray-400 mt-1">{detail.carriageTypeName || ''}</p>
                                                     </div>
                                                     <div>
                                                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Hành khách</p>
                                                         <p className="text-sm font-black text-gray-900">{detail.passengerName || '--'}</p>
-                                                        <p className="text-xs font-bold text-gray-400 mt-1">{detail.passengerType || 'Người lớn'}</p>
+                                                        <p className="text-xs font-black text-tet-red mt-1">
+                                                            {passengerSeatItems(bookingDetail.details)[index]?.label || passengerTypeLabel(detail.passengerType, true)}
+                                                        </p>
                                                     </div>
                                                     <div>
                                                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">CCCD / CMND</p>
@@ -648,6 +768,15 @@ const Orders = () => {
                                                             >
                                                                 {downloadingInvoiceId === order.bookingId ? <Train size={20} className="animate-spin" /> : <Download size={20} />}
                                                             </button>
+                                                            {canResumePayment(order) && (
+                                                                <Link
+                                                                    to={resumePaymentPathOf(order)}
+                                                                    className="inline-flex h-12 items-center gap-2 rounded-xl bg-emerald-500 px-4 text-[10px] font-black uppercase tracking-widest text-white shadow-lg shadow-emerald-500/20 transition-all hover:bg-emerald-600 active:scale-95"
+                                                                >
+                                                                    <CreditCard size={16} />
+                                                                    Thanh toan
+                                                                </Link>
+                                                            )}
                                                             <Link
                                                                 to={`/orders?bookingId=${order.bookingId}`}
                                                                 className="bg-gray-900 hover:bg-black text-white px-6 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-lg active:scale-95"

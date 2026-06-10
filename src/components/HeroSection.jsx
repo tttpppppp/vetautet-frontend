@@ -8,18 +8,15 @@ const HeroSection = () => {
 
     return (
         <section className="relative pt-20 sm:pt-24 md:pt-28 lg:pt-32 pb-8 sm:pb-10 md:pb-12 lg:pb-16 w-full min-h-[calc(100svh-60px)] sm:min-h-0 flex items-center">
-            {/* Background Image - subtle with white overlay */}
+            {/* Background Image */}
             <div
                 className="absolute inset-0 z-0"
                 style={{
-                    backgroundImage: `url('/vv.jpg')`,
+                    backgroundImage: `url('/chatgpt-banner.png')`,
                     backgroundPosition: 'center 30%',
                     backgroundSize: 'cover'
                 }}
-            >
-                {/* Very subtle gradient only at top for header readability */}
-                <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-white/30" />
-            </div>
+            />
 
             {/* Content Container */}
             <div className="max-w-7xl mx-auto px-4 sm:px-6 w-full relative z-10">

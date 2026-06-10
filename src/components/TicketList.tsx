@@ -32,7 +32,7 @@ const TicketList: React.FC = () => {
                             </p>
                         </div>
                         <Link
-                            to="/schedules"
+                            to="/search"
                             className="inline-flex items-center gap-1.5 self-start rounded-full px-1 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-gray-500 transition-colors hover:text-tet-red md:mt-4"
                         >
                             <CalendarDays size={15} />

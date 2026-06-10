@@ -19,6 +19,7 @@ import { bookingApi } from '../api/booking.api';
 import { useAuthStore } from '../store/useAuthStore';
 import { useBookingSocket } from '../hooks/useBookingSocket';
 import { useSeatSocket } from '../hooks/useSeatSocket';
+import { applyPassengerFareRule, buildPassengerTypeMeta } from '../lib/passengerFareRules';
 import {
     Trip,
     BookingResponse,
@@ -86,7 +87,7 @@ const bookingCodeOf = (booking?: Pick<BookingResponse, 'bookingId' | 'orderNumbe
 const isSeatAvailable = (status: SeatStatus | string | undefined) => normalizeSeatStatus(status) === 'AVAILABLE';
 
 const isSeatHeld = (status: SeatStatus | string | undefined) => {
-    return ['HOLD', 'HELD', 'PENDING'].includes(normalizeSeatStatus(status));
+    return ['HOLD', 'HELD', 'PENDING', 'QUEUED'].includes(normalizeSeatStatus(status));
 };
 
 const parseSegmentIds = (value?: string | number[] | null): number[] => {
@@ -243,6 +244,263 @@ const arePassengersValid = (passengers: PassengerRequest[]) =>
     passengers.length > 0 && passengers.every(p => p.name.trim() && isValidCccd(p.idCard));
 const isPassengerValid = (passenger: PassengerRequest) => passenger.name.trim() && isValidCccd(passenger.idCard);
 
+type PassengerTypeCode = 'ADULT' | 'CHILD' | 'SENIOR' | 'STUDENT';
+
+interface PassengerSlot {
+    type: PassengerTypeCode;
+    label: string;
+    discountLabel?: string;
+}
+
+const MAX_PASSENGER_SEATS = 10;
+const PASSENGER_INFO_TIMEOUT_MS = 8 * 60 * 1000;
+
+const PASSENGER_TYPE_META: Record<PassengerTypeCode, { label: string; discountLabel?: string }> = {
+    ADULT: { label: 'Người lớn' },
+    CHILD: { label: 'Trẻ em', discountLabel: '-25%' },
+    SENIOR: { label: 'Người cao tuổi', discountLabel: '-15%' },
+    STUDENT: { label: 'Sinh viên', discountLabel: '-10%' },
+};
+
+const PASSENGER_TYPE_ORDER: PassengerTypeCode[] = ['ADULT', 'CHILD', 'SENIOR', 'STUDENT'];
+
+const PASSENGER_TYPE_SUB_LABELS: Record<PassengerTypeCode, string> = {
+    ADULT: 'Từ 10 - 59 tuổi',
+    CHILD: '6 - 9 tuổi',
+    SENIOR: 'Từ 60 tuổi',
+    STUDENT: 'Thẻ SV',
+};
+
+const PASSENGER_TYPE_NOTES: Partial<Record<PassengerTypeCode, string>> = {
+    ADULT: 'Một người lớn được kèm 1 trẻ dưới 6 tuổi miễn vé, ngồi chung chỗ.',
+    SENIOR: 'Người cao tuổi áp dụng cho công dân Việt Nam từ 60 tuổi.',
+    STUDENT: 'Sinh viên cần giấy tờ hợp lệ khi đi tàu.',
+};
+
+const readPassengerCount = (params: URLSearchParams, keys: string[], fallback = 0) => {
+    const rawValue = keys.map((key) => params.get(key)).find((value) => value !== null);
+    const parsed = Number(rawValue ?? fallback);
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    return Math.floor(parsed);
+};
+
+const buildPassengerSlotsFromSearch = (params: URLSearchParams): PassengerSlot[] => {
+    let adult = readPassengerCount(params, ['passenger_adult', 'adults'], 0);
+    const child = readPassengerCount(params, ['passenger_child', 'childs', 'children'], 0);
+    const senior = readPassengerCount(params, ['passenger_senior', 'elderlys', 'seniors'], 0);
+    const student = readPassengerCount(params, ['passenger_student', 'students'], 0);
+    const explicitTotal = readPassengerCount(params, ['passengers', 'totalTicket'], 0);
+    const breakdownTotal = adult + child + senior + student;
+
+    if (!breakdownTotal) {
+        adult = explicitTotal || 1;
+    } else if (explicitTotal > breakdownTotal) {
+        adult += explicitTotal - breakdownTotal;
+    }
+
+    const slots: PassengerSlot[] = [];
+    const appendSlots = (type: PassengerTypeCode, count: number) => {
+        const meta = PASSENGER_TYPE_META[type];
+        for (let index = 1; index <= count && slots.length < MAX_PASSENGER_SEATS; index += 1) {
+            slots.push({
+                type,
+                label: `${meta.label} ${index}`,
+                discountLabel: meta.discountLabel,
+            });
+        }
+    };
+
+    appendSlots('ADULT', adult);
+    appendSlots('CHILD', child);
+    appendSlots('SENIOR', senior);
+    appendSlots('STUDENT', student);
+
+    return slots.length ? slots : [{ type: 'ADULT', label: 'Người lớn 1' }];
+};
+
+const buildPassengerSlotsForCount = (count: number, existingSlots: PassengerSlot[]) => {
+    if (count <= existingSlots.length) return existingSlots.slice(0, count);
+
+    const slots = [...existingSlots];
+    let adultIndex = slots.filter(slot => slot.type === 'ADULT').length;
+    while (slots.length < count && slots.length < MAX_PASSENGER_SEATS) {
+        adultIndex += 1;
+        slots.push({ type: 'ADULT', label: `Người lớn ${adultIndex}` });
+    }
+    return slots;
+};
+
+type PassengerCounts = Record<PassengerTypeCode, number>;
+
+const relabelPassengerSlots = (
+    slots: PassengerSlot[],
+    metaByType: Record<PassengerTypeCode, { label: string; discountLabel?: string }>,
+) => {
+    const counters = {} as PassengerCounts;
+    return slots.map((slot) => {
+        counters[slot.type] = (counters[slot.type] || 0) + 1;
+        const meta = metaByType[slot.type] || PASSENGER_TYPE_META[slot.type];
+        return {
+            ...slot,
+            label: `${meta.label} ${counters[slot.type]}`,
+            discountLabel: meta.discountLabel,
+        };
+    });
+};
+
+const formatDiscountBadge = (discountLabel?: string) => {
+    if (!discountLabel) return '';
+    return `Giảm ${discountLabel.replace(/^-/, '')}`;
+};
+
+const countPassengerSlots = (slots: PassengerSlot[]): PassengerCounts => (
+    PASSENGER_TYPE_ORDER.reduce((counts, type) => {
+        counts[type] = slots.filter(slot => slot.type === type).length;
+        return counts;
+    }, {} as PassengerCounts)
+);
+
+const totalPassengerCount = (counts: PassengerCounts) =>
+    PASSENGER_TYPE_ORDER.reduce((total, type) => total + (counts[type] || 0), 0);
+
+const formatPassengerBreakdown = (
+    counts: PassengerCounts,
+    metaByType: Record<PassengerTypeCode, { label: string }> = PASSENGER_TYPE_META,
+) => {
+    const items = PASSENGER_TYPE_ORDER
+        .filter(type => counts[type] > 0)
+        .map(type => `${counts[type]} ${metaByType[type].label.toLowerCase()}`);
+    return items.join(', ');
+};
+
+const formatCriteriaDate = (value?: string | null) => {
+    if (!value) return 'Chưa chọn';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString('vi-VN', {
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+    });
+};
+
+const formatCountdown = (seconds: number) => {
+    const safeSeconds = Math.max(0, Math.floor(seconds));
+    const minutes = Math.floor(safeSeconds / 60);
+    const remainingSeconds = safeSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+};
+
+const formatTravelDateShort = (value?: string | null) => {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    const weekday = date.toLocaleDateString('vi-VN', { weekday: 'long' });
+    const formattedDate = date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
+    return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}, ${formattedDate}`;
+};
+
+type TripCarriage = NonNullable<Trip['carriages']>[number];
+
+const getCarriageAvailableSeatCount = (carriage?: TripCarriage) =>
+    carriage?.seats?.filter(seat => isSeatAvailable(seat.status)).length || 0;
+
+const getCarriageMinSeatPrice = (carriage?: TripCarriage) => {
+    const prices = carriage?.seats
+        ?.filter(seat => isSeatAvailable(seat.status))
+        .map(seat => Number(seat.price || 0))
+        .filter(price => price > 0) || [];
+    return prices.length ? Math.min(...prices) : 0;
+};
+
+const formatCarriageNumberLabel = (value?: string | number) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return 'Toa';
+    return normalizeForMatch(raw).startsWith('toa') ? raw : `Toa ${raw}`;
+};
+
+const CHILD_CARRIAGE_VALIDATION_MESSAGE = 'Trẻ em phải ngồi cùng toa với ít nhất một người lớn.';
+
+const carriageKeyOf = (value?: string | number) => String(value ?? '').trim().toUpperCase();
+
+const findSeatCarriage = (trip?: Trip | null, seatId?: number) => {
+    if (!trip || !seatId) return undefined;
+    return trip.carriages?.find(carriage => carriage.seats?.some(seat => seat.id === seatId));
+};
+
+const getSeatPlaceLabel = (trip?: Trip | null, seat?: Seat) => {
+    if (!seat) return '';
+    const carriage = findSeatCarriage(trip, seat.id);
+    const carriageLabel = carriage ? formatCarriageNumberLabel(carriage.carriageNumber) : '';
+    return [carriageLabel, `Ghế ${seat.seatNumber}`].filter(Boolean).join(' - ');
+};
+
+const calculatePassengerFareFromItinerary = (
+    itinerary: TripItinerary | undefined,
+    segmentIds: number[],
+    carriageTypeId: number | undefined,
+    passengerType: PassengerTypeCode,
+    passengerFareRules: Parameters<typeof applyPassengerFareRule>[1],
+) => {
+    if (!itinerary || !segmentIds.length || !carriageTypeId) return undefined;
+    const segments = itinerary.segments?.filter(segment => segmentIds.includes(segment.id)) || [];
+    if (segments.length !== segmentIds.length) return undefined;
+
+    const adultPrices = segments
+        .map(segment => (segment.prices || []).find(price => (
+            price.carriageTypeId === carriageTypeId
+            && String(price.passengerType || 'ADULT').toUpperCase() === 'ADULT'
+            && String(price.status || 'ACTIVE').toUpperCase() === 'ACTIVE'
+        ))?.price)
+        .filter((price): price is number => typeof price === 'number' && Number.isFinite(price));
+    if (adultPrices.length === segments.length) {
+        return adultPrices.reduce((total, price) => total + applyPassengerFareRule(price, passengerFareRules, passengerType), 0);
+    }
+
+    const directPrices = segments
+        .map(segment => (segment.prices || []).find(price => (
+            price.carriageTypeId === carriageTypeId
+            && String(price.passengerType || 'ADULT').toUpperCase() === passengerType
+            && String(price.status || 'ACTIVE').toUpperCase() === 'ACTIVE'
+        ))?.price)
+        .filter((price): price is number => typeof price === 'number' && Number.isFinite(price));
+    return directPrices.length === segments.length
+        ? directPrices.reduce((total, price) => total + price, 0)
+        : undefined;
+};
+
+const validateChildSeatCarriages = (trip: Trip | null | undefined, seatIds: number[], passengerSlots: PassengerSlot[]) => {
+    if (!trip || !seatIds.length || !passengerSlots.some(slot => slot.type === 'CHILD')) return null;
+
+    const assignments = seatIds
+        .map((seatId, index) => {
+            const carriage = findSeatCarriage(trip, seatId);
+            return {
+                slot: passengerSlots[index],
+                carriageKey: carriageKeyOf(carriage?.carriageNumber),
+            };
+        })
+        .filter(assignment => assignment.slot && assignment.carriageKey);
+
+    const adultCarriages = new Set(
+        assignments
+            .filter(assignment => assignment.slot.type === 'ADULT')
+            .map(assignment => assignment.carriageKey),
+    );
+    const invalidChild = assignments.some(assignment => (
+        assignment.slot.type === 'CHILD' && !adultCarriages.has(assignment.carriageKey)
+    ));
+
+    return invalidChild ? CHILD_CARRIAGE_VALIDATION_MESSAGE : null;
+};
+
+const formatCarriageShortNumber = (value?: string | number) => {
+    const raw = String(value ?? '').trim();
+    const match = raw.match(/\d+/);
+    return match ? match[0] : raw;
+};
+
 const TicketDetails: React.FC = () => {
     const { t, i18n } = useTranslation();
     const { id } = useParams<{ id: string }>();
@@ -252,8 +510,16 @@ const TicketDetails: React.FC = () => {
     const queryClient = useQueryClient();
     const routeSearchParams = new URLSearchParams(location.search);
     const promoCode = (routeSearchParams.get('promoCode') || routeSearchParams.get('promo') || '').trim();
+    const routeBookingId = Number(routeSearchParams.get('bookingId')) || undefined;
+    const shouldResumePayment = ['1', 'true', 'yes'].includes(String(routeSearchParams.get('resumePayment') || routeSearchParams.get('pay') || '').toLowerCase());
     const routeDepartureStationId = Number(routeSearchParams.get('departureStationId')) || undefined;
     const routeArrivalStationId = Number(routeSearchParams.get('arrivalStationId')) || undefined;
+    const searchPassengerSlots = useMemo(
+        () => buildPassengerSlotsFromSearch(new URLSearchParams(location.search)),
+        [location.search],
+    );
+    const passengerCounts = useMemo(() => countPassengerSlots(searchPassengerSlots), [searchPassengerSlots]);
+    const [isPassengerPickerOpen, setIsPassengerPickerOpen] = useState(false);
     const [selectedDepartureStationId, setSelectedDepartureStationId] = useState<number | undefined>(routeDepartureStationId);
     const [selectedArrivalStationId, setSelectedArrivalStationId] = useState<number | undefined>(routeArrivalStationId);
     
@@ -272,10 +538,28 @@ const TicketDetails: React.FC = () => {
     const [paymentMethod, setPaymentMethod] = useState('');
     const [pendingPaymentMethod, setPendingPaymentMethod] = useState<string | null>(null);
     const [loginError, setLoginError] = useState<string | null>(null);
+    const [passengerInfoDeadlineMs, setPassengerInfoDeadlineMs] = useState<number | null>(null);
+    const [clockNowMs, setClockNowMs] = useState(Date.now());
     const [queuedBookingRequestId, setQueuedBookingRequestId] = useState<string | null>(null);
     const syncedBookingRef = useRef<number | null>(null);
     const currentBookingId = booking?.bookingId;
-    const currentBookingTicketIds = booking?.ticketIds || [];
+    const currentBookingTicketIds = useMemo(() => booking?.ticketIds || [], [booking?.ticketIds]);
+    const { data: passengerFareRules = [] } = useQuery({
+        queryKey: ['passenger-fare-rules'],
+        queryFn: tripApi.getPassengerFareRules,
+        staleTime: 5 * 60 * 1000,
+    });
+    const passengerTypeMeta = useMemo(
+        () => buildPassengerTypeMeta(passengerFareRules) as Record<PassengerTypeCode, { label: string; description: string; discountLabel?: string }>,
+        [passengerFareRules],
+    );
+    const requiredSeatCount = currentBookingTicketIds.length || searchPassengerSlots.length;
+    const requiredPassengerSlots = useMemo(
+        () => relabelPassengerSlots(buildPassengerSlotsForCount(requiredSeatCount, searchPassengerSlots), passengerTypeMeta),
+        [passengerTypeMeta, requiredSeatCount, searchPassengerSlots],
+    );
+    const requiredPassengerCounts = useMemo(() => countPassengerSlots(requiredPassengerSlots), [requiredPassengerSlots]);
+    const requiredPassengerBreakdown = useMemo(() => formatPassengerBreakdown(requiredPassengerCounts, passengerTypeMeta), [passengerTypeMeta, requiredPassengerCounts]);
 
     useEffect(() => {
         if (isAuthenticated && !user?.id) {
@@ -302,12 +586,32 @@ const TicketDetails: React.FC = () => {
         )));
     }, [bookingContact.idCard, bookingContact.name, passengers.length]);
 
+    useEffect(() => {
+        if (currentBookingId) return;
+        setSelectedSeats(prev => prev.length > requiredSeatCount ? prev.slice(0, requiredSeatCount) : prev);
+        setPassengers(prev => prev.length > requiredSeatCount ? prev.slice(0, requiredSeatCount) : prev);
+        setActivePassengerIndex(prev => Math.min(prev, Math.max(0, requiredSeatCount - 1)));
+    }, [currentBookingId, requiredSeatCount]);
+
     const { data: itinerary, isLoading: itineraryLoading } = useQuery({
         queryKey: ['trip-itinerary', id],
         queryFn: () => tripApi.getTripItinerary(parseInt(id!)),
         enabled: !!id,
         staleTime: 5 * 60 * 1000,
     });
+
+    useEffect(() => {
+        if (step !== 2) return;
+        const now = Date.now();
+        setClockNowMs(now);
+        setPassengerInfoDeadlineMs(now + PASSENGER_INFO_TIMEOUT_MS);
+    }, [step]);
+
+    useEffect(() => {
+        if (step !== 2) return undefined;
+        const intervalId = window.setInterval(() => setClockNowMs(Date.now()), 1000);
+        return () => window.clearInterval(intervalId);
+    }, [step]);
 
     const itineraryStops = [...(itinerary?.stops || [])].sort((a, b) => a.stopOrder - b.stopOrder);
     const firstRouteStop = itineraryStops[0];
@@ -343,29 +647,37 @@ const TicketDetails: React.FC = () => {
     });
 
     const quoteCarriageTypeId = resolveCarriageTypeId(itinerary, trip?.carriages?.[selectedCarIndex]?.carriageTypeName);
+    const quotePassengerType = requiredPassengerSlots[0]?.type || 'ADULT';
 
     const { data: fareQuote } = useQuery({
-        queryKey: ['trip-fare', id, effectiveDepartureStationId, effectiveArrivalStationId, quoteCarriageTypeId],
+        queryKey: ['trip-fare', id, effectiveDepartureStationId, effectiveArrivalStationId, quoteCarriageTypeId, quotePassengerType],
         queryFn: () => tripApi.quoteFare(parseInt(id!), {
             departureStationId: effectiveDepartureStationId!,
             arrivalStationId: effectiveArrivalStationId!,
             carriageTypeId: quoteCarriageTypeId!,
-            passengerType: 'ADULT',
+            passengerType: quotePassengerType,
         }),
         enabled: !!id && selectedRouteIsValid && !!quoteCarriageTypeId,
         staleTime: 60 * 1000,
     });
-    const selectedRouteSegmentIds = useMemo(() => fareQuote?.segmentIds || [], [fareQuote?.segmentIds]);
+    const selectedRouteSegmentIds = useMemo(() => {
+        if (fareQuote?.segmentIds?.length) return fareQuote.segmentIds;
+        if (!itinerary || !selectedDepartureStop || !selectedArrivalStop) return [];
+        return (itinerary.segments || [])
+            .filter(segment => segment.segmentOrder >= selectedDepartureStop.stopOrder)
+            .filter(segment => segment.segmentOrder < selectedArrivalStop.stopOrder)
+            .map(segment => segment.id);
+    }, [fareQuote?.segmentIds, itinerary, selectedArrivalStop, selectedDepartureStop]);
 
     useEffect(() => {
-        if (!trip || currentBookingId) return;
+        if (!trip || currentBookingId || queuedBookingRequestId) return;
         const availableSeatIds = new Set(
             getAllSeats(trip)
                 .filter(seat => isSeatAvailable(seat.status))
                 .map(seat => seat.id),
         );
         setSelectedSeats(prev => prev.filter(seatId => availableSeatIds.has(seatId)));
-    }, [currentBookingId, routeScopedArrivalStationId, routeScopedDepartureStationId, trip]);
+    }, [currentBookingId, queuedBookingRequestId, routeScopedArrivalStationId, routeScopedDepartureStationId, trip]);
 
     const { data: myBookings = [] } = useQuery({
         queryKey: ['my-bookings', 'ticket-details'],
@@ -380,6 +692,42 @@ const TicketDetails: React.FC = () => {
         enabled: !!currentBookingId,
         staleTime: 30_000,
     });
+
+    useEffect(() => {
+        if (!routeBookingId || booking?.bookingId === routeBookingId || queuedBookingRequestId) return;
+
+        const routedBooking = myBookings.find(item => item.bookingId === routeBookingId);
+        if (!routedBooking || !isPendingBookingStatus(routedBooking.status)) return;
+
+        setBooking({
+            bookingId: routedBooking.bookingId,
+            requestId: routedBooking.requestId,
+            orderNumber: routedBooking.orderNumber,
+            storageMonth: routedBooking.storageMonth,
+            status: routedBooking.status,
+            originalPrice: routedBooking.originalPrice,
+            promoCode: routedBooking.promoCode,
+            discountAmount: routedBooking.discountAmount,
+            totalPrice: routedBooking.totalPrice,
+            expiredAt: routedBooking.expiredAt || '',
+            seatNumbers: routedBooking.seatNumbers,
+            ticketIds: routedBooking.ticketIds,
+        });
+        if (routedBooking.departureStationId) {
+            setSelectedDepartureStationId(routedBooking.departureStationId);
+        }
+        if (routedBooking.arrivalStationId) {
+            setSelectedArrivalStationId(routedBooking.arrivalStationId);
+        }
+        setPaymentMethod(prev => prev || routedBooking.paymentMethod?.toLowerCase() || '');
+        setLoginError(null);
+        if (routedBooking.ticketIds?.length) {
+            setSelectedSeats(routedBooking.ticketIds);
+        }
+        if (shouldResumePayment) {
+            setStep(3);
+        }
+    }, [booking?.bookingId, myBookings, queuedBookingRequestId, routeBookingId, shouldResumePayment]);
 
     useEffect(() => {
         if (!queuedBookingRequestId) return;
@@ -472,9 +820,10 @@ const TicketDetails: React.FC = () => {
             ticketId,
             name: index === 0 ? bookingContact.name : '',
             idCard: index === 0 ? bookingContact.idCard : '',
+            passengerType: requiredPassengerSlots[index]?.type || 'ADULT',
         })));
         setActivePassengerIndex(0);
-    }, [booking]);
+    }, [booking, bookingContact.idCard, bookingContact.name, requiredPassengerSlots]);
 
     useEffect(() => {
         if (!bookingDetail?.details?.length) return;
@@ -505,12 +854,13 @@ const TicketDetails: React.FC = () => {
             idCard: bookingDetail.contactIdCard || prev.idCard,
         }));
 
-        setPassengers(bookingDetail.details.map(detail => ({
+        setPassengers(bookingDetail.details.map((detail, index) => ({
             ticketId: detail.ticketId,
             name: detail.passengerName || '',
             idCard: detail.passengerIdCard || '',
+            passengerType: detail.passengerType || requiredPassengerSlots[index]?.type || 'ADULT',
         })));
-    }, [bookingDetail]);
+    }, [bookingDetail, requiredPassengerSlots]);
 
     useEffect(() => {
         if (!trip?.carriages?.length || !currentBookingTicketIds.length) return;
@@ -566,6 +916,33 @@ const TicketDetails: React.FC = () => {
 
     useSeatSocket(trip?.id, handleSeatUpdate);
 
+    const markQueuedSeatsInTripCache = useCallback((ticketIds: number[] = []) => {
+        if (!ticketIds.length) return;
+        const queuedTicketIds = new Set(ticketIds);
+        const markSeat = (seat: Seat): Seat => (
+            queuedTicketIds.has(seat.id)
+                ? {
+                    ...seat,
+                    status: 'QUEUED',
+                    heldByCurrentBooking: false,
+                    holdingBookingId: null,
+                }
+                : seat
+        );
+
+        queryClient.setQueryData(tripQueryKey, (prevTrip: Trip | undefined) => {
+            if (!prevTrip) return prevTrip;
+            return {
+                ...prevTrip,
+                seats: prevTrip.seats?.map(markSeat),
+                carriages: prevTrip.carriages?.map(carriage => ({
+                    ...carriage,
+                    seats: carriage.seats.map(markSeat),
+                })) ?? prevTrip.carriages,
+            };
+        });
+    }, [queryClient, tripQueryKey]);
+
     // Mutations
     const createBookingMutation = useMutation({
         mutationFn: bookingApi.createBooking,
@@ -575,6 +952,7 @@ const TicketDetails: React.FC = () => {
                 setBooking(null);
                 if (res.ticketIds?.length) {
                     setSelectedSeats(res.ticketIds);
+                    markQueuedSeatsInTripCache(res.ticketIds);
                 }
                 setStep(3);
                 setLoginError(null);
@@ -648,6 +1026,42 @@ const TicketDetails: React.FC = () => {
         setLoginError(null);
     };
 
+    const updatePassengerCriteria = (type: PassengerTypeCode, delta: number) => {
+        if (currentBookingId || isBookingQueued) return;
+
+        const nextCounts = { ...passengerCounts };
+        const currentTotal = totalPassengerCount(nextCounts);
+        if (delta > 0 && currentTotal >= MAX_PASSENGER_SEATS) return;
+
+        const minValue = type === 'ADULT' ? 1 : 0;
+        const nextValue = Math.max(minValue, (nextCounts[type] || 0) + delta);
+        if (nextValue === nextCounts[type]) return;
+
+        nextCounts[type] = nextValue;
+        const nextTotal = totalPassengerCount(nextCounts);
+        const params = new URLSearchParams(location.search);
+        params.set('passengers', String(nextTotal));
+        params.set('passenger_adult', String(nextCounts.ADULT || 1));
+        if (nextCounts.CHILD) params.set('passenger_child', String(nextCounts.CHILD));
+        else params.delete('passenger_child');
+        if (nextCounts.SENIOR) params.set('passenger_senior', String(nextCounts.SENIOR));
+        else params.delete('passenger_senior');
+        if (nextCounts.STUDENT) params.set('passenger_student', String(nextCounts.STUDENT));
+        else params.delete('passenger_student');
+
+        setSelectedSeats([]);
+        setPassengers([]);
+        setActivePassengerIndex(0);
+        setLoginError(null);
+        navigate(
+            {
+                pathname: location.pathname,
+                search: `?${params.toString()}`,
+            },
+            { replace: true },
+        );
+    };
+
     const syncRouteToUrl = (departureStationId: number, arrivalStationId: number) => {
         const params = new URLSearchParams(location.search);
         const departureStop = itineraryStops.find(item => item.stationId === departureStationId);
@@ -706,15 +1120,29 @@ const TicketDetails: React.FC = () => {
     const toggleSeat = (seatId: number) => {
         if (selectedSeats.includes(seatId)) {
             if (currentBookingTicketIds.includes(seatId)) return;
-            setSelectedSeats(selectedSeats.filter(s => s !== seatId));
+            const nextSeats = selectedSeats.filter(s => s !== seatId);
+            setSelectedSeats(nextSeats);
+            setActivePassengerIndex(Math.min(nextSeats.length, Math.max(0, requiredSeatCount - 1)));
+            setLoginError(validateChildSeatCarriages(trip, nextSeats, requiredPassengerSlots));
         } else {
             if (currentBookingTicketIds.includes(seatId)) {
                 setSelectedSeats(prev => [...prev, seatId]);
                 return;
             }
             if (currentBookingId) return;
-            if (selectedSeats.length >= 4) return;
-            setSelectedSeats([...selectedSeats, seatId]);
+            if (selectedSeats.length >= requiredSeatCount) {
+                setLoginError(`Bạn chỉ cần chọn ${requiredSeatCount} ghế cho ${requiredSeatCount} hành khách. Bỏ chọn một ghế nếu muốn đổi chỗ.`);
+                return;
+            }
+            const nextSeats = [...selectedSeats, seatId];
+            const childCarriageError = validateChildSeatCarriages(trip, nextSeats, requiredPassengerSlots);
+            if (childCarriageError) {
+                setLoginError(childCarriageError);
+                return;
+            }
+            setSelectedSeats(nextSeats);
+            setActivePassengerIndex(Math.min(selectedSeats.length + 1, Math.max(0, requiredSeatCount - 1)));
+            setLoginError(null);
         }
     };
 
@@ -723,7 +1151,8 @@ const TicketDetails: React.FC = () => {
             navigate('/login', { state: { from: `${location.pathname}${location.search}` } });
             return;
         }
-        if (!trip || selectedSeats.length === 0) return;
+        const processSeatIds = selectedSeats.length > 0 ? selectedSeats : currentBookingTicketIds;
+        if (!trip || processSeatIds.length === 0) return;
 
         if (booking) {
             const hasPassengerInfo = arePassengersValid(passengers);
@@ -731,10 +1160,22 @@ const TicketDetails: React.FC = () => {
             return;
         }
 
-        setPassengers(selectedSeats.map((ticketId, index) => ({
+        if (processSeatIds.length !== requiredSeatCount) {
+            setLoginError(`Vui lòng chọn đủ ${requiredSeatCount} ghế cho ${requiredSeatCount} hành khách trước khi tiếp tục.`);
+            return;
+        }
+
+        const childCarriageError = validateChildSeatCarriages(trip, processSeatIds, requiredPassengerSlots);
+        if (childCarriageError) {
+            setLoginError(childCarriageError);
+            return;
+        }
+
+        setPassengers(processSeatIds.map((ticketId, index) => ({
             ticketId,
             name: index === 0 ? bookingContact.name : '',
             idCard: index === 0 ? bookingContact.idCard : '',
+            passengerType: requiredPassengerSlots[index]?.type || 'ADULT',
         })));
         setActivePassengerIndex(0);
         setLoginError(null);
@@ -778,6 +1219,26 @@ const TicketDetails: React.FC = () => {
 
     const handleUpdatePassengers = () => {
         if (!trip) return;
+        if (step === 2 && passengerInfoDeadlineMs && Date.now() >= passengerInfoDeadlineMs) {
+            setLoginError('Hết thời gian nhập thông tin. Vui lòng quay lại chọn ghế để giữ chỗ lại.');
+            return;
+        }
+        if (!bookingContact.phone.trim() || !bookingContact.email.trim()) {
+            setLoginError('Vui lòng nhập số điện thoại và email để nhận vé điện tử.');
+            return;
+        }
+        if (!booking && selectedSeats.length !== requiredSeatCount) {
+            setStep(1);
+            setLoginError(`Vui lòng chọn đủ ${requiredSeatCount} ghế cho ${requiredSeatCount} hành khách trước khi đặt vé.`);
+            return;
+        }
+        const processSeatIds = selectedSeats.length > 0 ? selectedSeats : currentBookingTicketIds;
+        const childCarriageError = validateChildSeatCarriages(trip, processSeatIds, requiredPassengerSlots);
+        if (childCarriageError) {
+            setStep(1);
+            setLoginError(childCarriageError);
+            return;
+        }
         if (!arePassengersValid(passengers)) {
             const firstInvalidIndex = passengers.findIndex(passenger => !isPassengerValid(passenger));
             if (firstInvalidIndex >= 0) setActivePassengerIndex(firstInvalidIndex);
@@ -788,10 +1249,11 @@ const TicketDetails: React.FC = () => {
             return;
         }
 
-        const normalizedPassengers = passengers.map(passenger => ({
+        const normalizedPassengers = passengers.map((passenger, index) => ({
             ...passenger,
             name: passenger.name.trim(),
             idCard: normalizeCccd(passenger.idCard),
+            passengerType: passenger.passengerType || requiredPassengerSlots[index]?.type || 'ADULT',
         }));
 
         if (booking?.bookingId) {
@@ -875,11 +1337,48 @@ const TicketDetails: React.FC = () => {
     const departureStationLabel = fareQuote?.departureStationName || routeSearchParams.get('departure') || formatStationName(trip.departureStation);
     const arrivalStationLabel = fareQuote?.arrivalStationName || routeSearchParams.get('arrival') || formatStationName(trip.arrivalStation);
     const allSeats = getAllSeats(trip);
-    const selectedSeatDetails = selectedSeats
+    const processSeatIds = selectedSeats.length > 0 ? selectedSeats : currentBookingTicketIds;
+    const selectedSeatDetails = processSeatIds
         .map(ticketId => allSeats.find(seat => seat.id === ticketId))
         .filter(Boolean) as Seat[];
-    const seatUnitPrice = fareQuote?.totalPrice;
-    const totalPrice = selectedSeatDetails.reduce((total, seat) => total + (seatUnitPrice ?? seat.price ?? 0), 0);
+    const isSeatSelectionComplete = processSeatIds.length === requiredSeatCount;
+    const childSeatValidationMessage = validateChildSeatCarriages(trip, processSeatIds, requiredPassengerSlots);
+    const canContinueSeatSelection = isSeatSelectionComplete && !childSeatValidationMessage;
+    const passengerSeatAssignments = requiredPassengerSlots.map((slot, index) => {
+        const seat = selectedSeatDetails[index];
+        return {
+            ...slot,
+            seat,
+            seatPlace: getSeatPlaceLabel(trip, seat),
+        };
+    });
+    const passengerSeatPrices = selectedSeatDetails.map((seat, index) => {
+        const slot = requiredPassengerSlots[index];
+        const carriage = findSeatCarriage(trip, seat?.id);
+        const carriageTypeId = resolveCarriageTypeId(itinerary, carriage?.carriageTypeName);
+        const itineraryPrice = calculatePassengerFareFromItinerary(
+            itinerary,
+            selectedRouteSegmentIds,
+            carriageTypeId,
+            slot?.type || 'ADULT',
+            passengerFareRules,
+        );
+        if (typeof itineraryPrice === 'number' && Number.isFinite(itineraryPrice)) {
+            return itineraryPrice;
+        }
+
+        const passengerType = slot?.type || 'ADULT';
+        const quotePrice = Number(fareQuote?.totalPrice);
+        if (fareQuote && String(fareQuote.passengerType || 'ADULT').toUpperCase() === passengerType && Number.isFinite(quotePrice)) {
+            return quotePrice;
+        }
+
+        const basePrice = Number.isFinite(Number(seat.price)) ? Number(seat.price) : quotePrice;
+        return Number.isFinite(basePrice)
+            ? applyPassengerFareRule(basePrice, passengerFareRules, passengerType)
+            : 0;
+    });
+    const totalPrice = passengerSeatPrices.reduce((total, price) => total + price, 0);
     const payableTotal = booking?.totalPrice ?? totalPrice;
     const originalPrice = booking?.originalPrice ?? totalPrice;
     const discountAmount = booking?.discountAmount ?? 0;
@@ -892,6 +1391,19 @@ const TicketDetails: React.FC = () => {
     const routeLineWidth = selectedDepartureStop && selectedArrivalStop && itineraryStops.length > 1
         ? ((selectedArrivalStop.stopOrder - selectedDepartureStop.stopOrder) / (itineraryStops.length - 1)) * 100
         : 0;
+    const criteriaTicketType = routeSearchParams.get('ticketType') || (routeSearchParams.get('roundTrip') === 'true' ? 'round-trip' : 'one-way');
+    const isRoundTripCriteria = criteriaTicketType === 'round-trip';
+    const criteriaDateValue = routeSearchParams.get('date') || trip.departureTime?.split('T')[0] || '';
+    const criteriaReturnDateValue = routeSearchParams.get('returnDate') || '';
+    const passengerInfoRemainingSeconds = step === 2 && passengerInfoDeadlineMs
+        ? Math.max(0, Math.ceil((passengerInfoDeadlineMs - clockNowMs) / 1000))
+        : PASSENGER_INFO_TIMEOUT_MS / 1000;
+    const passengerInfoCountdown = formatCountdown(passengerInfoRemainingSeconds);
+    const passengerInfoExpired = step === 2 && passengerInfoRemainingSeconds <= 0;
+    const serviceFee = 0;
+    const bookingFee = 0;
+    const passengerInfoTotal = payableTotal + serviceFee + bookingFee;
+    const isContactInfoValid = Boolean(bookingContact.phone.trim() && bookingContact.email.trim());
 
     return (
         <main className="min-h-screen bg-[#FDFDFD] flex flex-col">
@@ -958,6 +1470,134 @@ const TicketDetails: React.FC = () => {
                             className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]"
                         >
                             <div className="space-y-8">
+                                <div className="rounded-3xl border border-gray-100 bg-white p-4 shadow-sm md:p-5">
+                                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[120px_minmax(0,1fr)_180px_180px_240px]">
+                                        <div className="flex min-h-16 items-center rounded-2xl border border-gray-100 bg-gray-50 px-4">
+                                            <div>
+                                                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Loại vé</p>
+                                                <p className="mt-1 text-sm font-black text-gray-900">
+                                                    {isRoundTripCriteria ? 'Khứ hồi' : 'Một chiều'}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex min-h-16 items-center gap-3 rounded-2xl border border-gray-100 bg-gray-50 px-4">
+                                            <Train size={18} className="shrink-0 text-tet-red" />
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Chặng</p>
+                                                <p className="mt-1 truncate text-sm font-black text-gray-900">
+                                                    {departureStationLabel}{' -> '}{arrivalStationLabel}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex min-h-16 items-center gap-3 rounded-2xl border border-gray-100 bg-gray-50 px-4">
+                                            <Calendar size={18} className="shrink-0 text-tet-red" />
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Ngày đi</p>
+                                                <p className="mt-1 truncate text-sm font-black text-gray-900">
+                                                    {formatCriteriaDate(criteriaDateValue)}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex min-h-16 items-center gap-3 rounded-2xl border border-gray-100 bg-gray-50 px-4">
+                                            <Calendar size={18} className="shrink-0 text-gray-400" />
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Ngày về</p>
+                                                <p className="mt-1 truncate text-sm font-black text-gray-900">
+                                                    {isRoundTripCriteria ? formatCriteriaDate(criteriaReturnDateValue) : 'Một chiều'}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsPassengerPickerOpen(prev => !prev)}
+                                            className="flex min-h-16 items-center gap-3 rounded-2xl border border-gray-100 bg-gray-50 px-4 text-left transition hover:border-red-100 hover:bg-white"
+                                        >
+                                            <Users size={18} className="shrink-0 text-tet-red" />
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Số lượng vé</p>
+                                                <p className="mt-1 text-sm font-black text-gray-900">{requiredSeatCount} khách</p>
+                                                <p className="truncate text-[11px] font-bold text-gray-400">{requiredPassengerBreakdown}</p>
+                                            </div>
+                                        </button>
+
+                                    </div>
+
+                                    <AnimatePresence>
+                                        {isPassengerPickerOpen && (
+                                            <motion.div
+                                                initial={{ opacity: 0, y: -8 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                exit={{ opacity: 0, y: -8 }}
+                                                className="mt-4 grid grid-cols-1 gap-4 rounded-3xl border border-gray-100 bg-gray-50 p-4 lg:grid-cols-[minmax(0,1fr)_320px]"
+                                            >
+                                                <div className="rounded-2xl bg-white p-2">
+                                                    {PASSENGER_TYPE_ORDER.map((type) => {
+                                                        const count = requiredPassengerCounts[type] || 0;
+                                                        const meta = passengerTypeMeta[type];
+                                                        const minValue = type === 'ADULT' ? 1 : 0;
+                                                        const canDecrease = !currentBookingId && !isBookingQueued && count > minValue;
+                                                        const canIncrease = !currentBookingId && !isBookingQueued && requiredSeatCount < MAX_PASSENGER_SEATS;
+
+                                                        return (
+                                                            <div key={type} className="flex items-center justify-between gap-4 border-b border-gray-100 px-3 py-4 last:border-b-0">
+                                                                <div className="min-w-0">
+                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                        <p className="text-sm font-black text-gray-900">{meta.label}</p>
+                                                                        {meta.discountLabel && (
+                                                                            <span className="rounded-full bg-orange-50 px-2 py-0.5 text-[10px] font-black text-orange-500">
+                                                                                {meta.discountLabel}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <p className="mt-1 text-xs font-bold text-gray-400">{meta.description || PASSENGER_TYPE_SUB_LABELS[type]}</p>
+                                                                </div>
+                                                                <div className="flex shrink-0 items-center gap-3">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => updatePassengerCriteria(type, -1)}
+                                                                        disabled={!canDecrease}
+                                                                        className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-lg font-black text-gray-500 transition hover:border-tet-red hover:text-tet-red disabled:cursor-not-allowed disabled:opacity-35"
+                                                                    >
+                                                                        -
+                                                                    </button>
+                                                                    <span className="w-6 text-center text-base font-black text-gray-900">{count}</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => updatePassengerCriteria(type, 1)}
+                                                                        disabled={!canIncrease}
+                                                                        className="flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-lg font-black text-gray-500 transition hover:border-tet-red hover:text-tet-red disabled:cursor-not-allowed disabled:opacity-35"
+                                                                    >
+                                                                        +
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+
+                                                <div className="rounded-2xl bg-white p-5">
+                                                    <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Lưu ý</p>
+                                                    <div className="mt-3 space-y-3 text-sm font-bold leading-relaxed text-gray-600">
+                                                        {PASSENGER_TYPE_ORDER
+                                                            .filter(type => PASSENGER_TYPE_NOTES[type])
+                                                            .map(type => (
+                                                                <p key={type}>
+                                                                    <span className="font-black text-gray-900">{passengerTypeMeta[type].label}:</span>{' '}
+                                                                    {PASSENGER_TYPE_NOTES[type]}
+                                                                </p>
+                                                            ))}
+                                                        <p>Đặt vé đoàn từ 10 khách: liên hệ hỗ trợ.</p>
+                                                    </div>
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
+
                                 {itinerary?.stops?.length ? (
                                     <div className="rounded-3xl border border-gray-100 bg-white p-4 md:p-5 shadow-sm">
                                         <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
@@ -1116,34 +1756,45 @@ const TicketDetails: React.FC = () => {
                                         </div>
                                     )}
                                     <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-hide">
-                                        {trip.carriages?.map((car, idx) => (
-                                            <button 
-                                                key={idx} 
-                                                onClick={() => setSelectedCarIndex(idx)}
-                                                className={cn(
-                                                    "min-w-[160px] p-4 rounded-2xl border-2 transition-all flex flex-col items-center gap-3 group relative overflow-hidden",
-                                                    selectedCarIndex === idx 
-                                                        ? "border-tet-red bg-white shadow-xl shadow-red-50" 
-                                                        : "border-gray-100 bg-white hover:border-gray-200 text-gray-400 grayscale opacity-60"
-                                                )}
-                                            >
-                                                {selectedCarIndex === idx && (
-                                                    <motion.div layoutId="car-glow" className="absolute inset-0 bg-tet-red/5" />
-                                                )}
-                                                <div className={cn(
-                                                    "w-12 h-12 rounded-xl flex items-center justify-center transition-all",
-                                                    selectedCarIndex === idx ? "bg-tet-red text-white" : "bg-gray-50 text-gray-300"
-                                                )}>
-                                                    <Train size={24} />
-                                                </div>
-                                                <div className="text-center">
-                                                    <p className={cn("text-[10px] font-black uppercase tracking-widest mb-1", selectedCarIndex === idx ? "text-tet-red" : "text-gray-400")}>
-                                                        Toa {car.carriageNumber}
-                                                    </p>
-                                                    <p className="text-xs font-black text-gray-900 line-clamp-1">{formatCarriageTypeName(car.carriageTypeName)}</p>
-                                                </div>
-                                            </button>
-                                        ))}
+                                        {trip.carriages?.map((car, idx) => {
+                                            const availableInCarriage = getCarriageAvailableSeatCount(car);
+                                            const minSeatPrice = getCarriageMinSeatPrice(car);
+
+                                            return (
+                                                <button
+                                                    key={idx}
+                                                    onClick={() => setSelectedCarIndex(idx)}
+                                                    className={cn(
+                                                        "min-w-[230px] p-4 rounded-2xl border-2 transition-all flex items-start gap-3 group relative overflow-hidden text-left",
+                                                        selectedCarIndex === idx
+                                                            ? "border-tet-red bg-white shadow-xl shadow-red-50"
+                                                            : "border-gray-100 bg-white hover:border-gray-200 text-gray-400 opacity-70"
+                                                    )}
+                                                >
+                                                    {selectedCarIndex === idx && (
+                                                        <motion.div layoutId="car-glow" className="absolute inset-0 bg-tet-red/5" />
+                                                    )}
+                                                    <div className={cn(
+                                                        "relative z-10 w-12 h-12 shrink-0 rounded-xl flex items-center justify-center transition-all",
+                                                        selectedCarIndex === idx ? "bg-tet-red text-white" : "bg-gray-50 text-gray-300"
+                                                    )}>
+                                                        <Train size={24} />
+                                                    </div>
+                                                    <div className="relative z-10 min-w-0 flex-1">
+                                                        <p className={cn("text-[10px] font-black uppercase tracking-widest mb-1", selectedCarIndex === idx ? "text-tet-red" : "text-gray-400")}>
+                                                            {formatCarriageNumberLabel(car.carriageNumber)}
+                                                        </p>
+                                                        <p className="text-sm font-black text-gray-900 line-clamp-2">
+                                                            {formatCarriageTypeName(car.carriageTypeName)}
+                                                        </p>
+                                                        <p className="mt-2 text-[11px] font-bold text-gray-400">
+                                                            Còn {availableInCarriage} chỗ
+                                                            {minSeatPrice > 0 ? ` | Từ ${formatPrice(minSeatPrice)}` : ''}
+                                                        </p>
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 </div>
 
@@ -1166,15 +1817,18 @@ const TicketDetails: React.FC = () => {
                                     <div className="flex flex-col md:flex-row justify-between items-center mb-10 gap-6">
                                         <div className="flex items-center gap-3 bg-gray-50 px-5 py-3 rounded-2xl">
                                             <div className="w-8 h-8 bg-white rounded-lg border border-gray-100 flex items-center justify-center text-tet-red font-black text-sm">
-                                                {currentCarriage?.carriageNumber}
+                                                {formatCarriageShortNumber(currentCarriage?.carriageNumber)}
                                             </div>
                                             <div>
                                                 <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mb-1">{t('ticket_details.carriage.active')}</p>
                                                 <p className="text-sm font-black text-gray-900">{formatCarriageTypeName(currentCarriage?.carriageTypeName)}</p>
+                                                <p className="mt-1 text-[10px] font-bold text-gray-400">
+                                                    Còn {getCarriageAvailableSeatCount(currentCarriage)} chỗ trong toa
+                                                </p>
                                             </div>
                                         </div>
 
-                                        <div className="flex items-center gap-6">
+                                        <div className="flex flex-wrap items-center justify-center gap-4 md:justify-end">
                                             <div className="flex items-center gap-2">
                                                 <div className="w-3 h-3 rounded-full bg-gray-100 border border-gray-200" />
                                                 <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('ticket_details.seats.available')}</span>
@@ -1182,6 +1836,14 @@ const TicketDetails: React.FC = () => {
                                             <div className="flex items-center gap-2">
                                                 <div className="w-3 h-3 rounded-full bg-tet-red shadow-sm shadow-tet-red/20" />
                                                 <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('ticket_details.seats.selected')}</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-3 h-3 rounded-full bg-blue-500 shadow-sm shadow-blue-500/20" />
+                                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Chờ xử lý</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/20" />
+                                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Đã giữ</span>
                                             </div>
                                             <div className="flex items-center gap-2">
                                                 <div className="w-3 h-3 rounded-full bg-tet-yellow shadow-sm shadow-tet-yellow/20" />
@@ -1195,10 +1857,10 @@ const TicketDetails: React.FC = () => {
                                     </div>
 
                                     {hasPendingBooking && (
-                                        <div className="mb-8 p-4 rounded-2xl border border-blue-100 bg-blue-50 text-blue-900">
-                                            <p className="text-[10px] font-black uppercase tracking-[0.25em] mb-2">Kiểm tra ghế</p>
+                                        <div className="mb-8 p-4 rounded-2xl border border-emerald-100 bg-emerald-50 text-emerald-900">
+                                            <p className="text-[10px] font-black uppercase tracking-[0.25em] mb-2">Ghế đang giữ</p>
                                             <p className="text-sm font-bold leading-relaxed">
-                                                Ghế trong đơn hiện tại chỉ hiển thị để kiểm tra. Nếu muốn đổi ghế, vui lòng chờ hết thời gian giữ chỗ hoặc hủy đơn và đặt lại.
+                                                Ghế màu xanh là ghế hệ thống đang giữ cho đơn hiện tại. Bạn có thể tiếp tục nhập thông tin hoặc thanh toán.
                                             </p>
                                         </div>
                                     )}
@@ -1209,9 +1871,22 @@ const TicketDetails: React.FC = () => {
                                             const isAvailable = isSeatAvailable(seat.status);
                                             const isHeld = isSeatHeld(seat.status);
                                             const isHeldByMe = isSeatHeldByCurrentBooking(seat, currentBookingId, currentBookingTicketIds);
+                                            const normalizedStatus = normalizeSeatStatus(seat.status);
+                                            const isQueued = ['QUEUED', 'PENDING'].includes(normalizedStatus) && !isHeldByMe;
                                             const isSold = !isAvailable && !isHeld && !isHeldByMe;
-                                            const canSelectFreshSeat = isAvailable && !currentBookingId;
+                                            const canSelectFreshSeat = isAvailable && !currentBookingId && !isBookingQueued;
                                             const canInteract = canSelectFreshSeat || isHeldByMe;
+                                            const seatStatusLabel = isQueued
+                                                ? 'QUEUE'
+                                                : isHeldByMe
+                                                    ? 'HOLD'
+                                                    : isHeld
+                                                        ? 'HOLD'
+                                                        : isSold
+                                                            ? 'SOLD'
+                                                            : isSelected
+                                                                ? 'CHON'
+                                                                : null;
                                             
                                             return (
                                                 <motion.button
@@ -1223,7 +1898,9 @@ const TicketDetails: React.FC = () => {
                                                     className={cn(
                                                         "group relative aspect-square rounded-2xl flex flex-col items-center justify-center gap-1 transition-all",
                                                         isHeldByMe
-                                                            ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20 ring-4 ring-blue-50"
+                                                            ? "bg-emerald-500 text-white shadow-xl shadow-emerald-500/20 ring-4 ring-emerald-50"
+                                                            : isQueued
+                                                            ? "bg-blue-500 text-white shadow-xl shadow-blue-500/20 ring-4 ring-blue-50 cursor-wait"
                                                             : isHeld
                                                                 ? "bg-yellow-100 border-2 border-yellow-300 text-yellow-800 shadow-lg shadow-yellow-200/40 cursor-not-allowed"
                                                             : isSold
@@ -1237,9 +1914,21 @@ const TicketDetails: React.FC = () => {
                                                                     : "bg-white border-2 border-gray-100 text-gray-500 hover:border-tet-red hover:shadow-lg hover:shadow-tet-red/10"
                                                     )}
                                                 >
+                                                    {seatStatusLabel && (
+                                                        <span className={cn(
+                                                            "absolute right-1.5 top-1.5 rounded-full px-1.5 py-0.5 text-[7px] font-black leading-none",
+                                                            isQueued
+                                                                ? "bg-white/20 text-white"
+                                                                : isHeldByMe || isSelected || isSold
+                                                                    ? "bg-white/20 text-white"
+                                                                    : "bg-yellow-200 text-yellow-800"
+                                                        )}>
+                                                            {seatStatusLabel}
+                                                        </span>
+                                                    )}
                                                     <Armchair size={16} className={cn(
                                                         "transition-colors",
-                                                        isHeldByMe || isSelected
+                                                        isQueued || isHeldByMe || isSelected
                                                             ? "text-white"
                                                             : isHeld
                                                                 ? "text-yellow-600"
@@ -1251,7 +1940,7 @@ const TicketDetails: React.FC = () => {
                                                     )} />
                                                     <span className={cn(
                                                         "text-[10px] font-black",
-                                                        isHeldByMe
+                                                        isQueued || isHeldByMe
                                                             ? "text-white"
                                                             : isHeld
                                                                 ? "text-yellow-700"
@@ -1262,6 +1951,58 @@ const TicketDetails: React.FC = () => {
                                                 </motion.button>
                                             );
                                         })}
+                                    </div>
+
+                                    <div className="mt-8 rounded-3xl border border-gray-100 bg-gray-50/70 p-4 md:p-5">
+                                        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                            <div>
+                                                <p className="text-[10px] font-black uppercase tracking-[0.25em] text-tet-red">
+                                                    Ghế theo hành khách
+                                                </p>
+                                                <p className="mt-1 text-sm font-bold text-gray-500">
+                                                    Mỗi hành khách cần một ghế riêng trước khi tiếp tục.
+                                                </p>
+                                            </div>
+                                            <span className={cn(
+                                                "rounded-full px-4 py-2 text-xs font-black uppercase tracking-widest",
+                                                isSeatSelectionComplete ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-tet-red"
+                                            )}>
+                                                Đã chọn {processSeatIds.length}/{requiredSeatCount} chỗ
+                                            </span>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                                            {passengerSeatAssignments.map((slot, index) => (
+                                                <button
+                                                    key={`${slot.type}-${index}`}
+                                                    type="button"
+                                                    onClick={() => setActivePassengerIndex(index)}
+                                                    className={cn(
+                                                        "rounded-2xl border bg-white p-4 text-left transition-all",
+                                                        activePassengerIndex === index
+                                                            ? "border-tet-red ring-4 ring-red-50"
+                                                            : "border-gray-100 hover:border-red-100"
+                                                    )}
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-sm font-black text-gray-900">{slot.label}</p>
+                                                            <p className={cn(
+                                                                "mt-1 text-xs font-bold",
+                                                                slot.seat ? "text-tet-red" : "text-gray-400"
+                                                            )}>
+                                                                {slot.seat ? slot.seatPlace : 'Chưa chọn'}
+                                                            </p>
+                                                        </div>
+                                                        {slot.discountLabel && (
+                                                            <span className="shrink-0 rounded-full bg-orange-50 px-2 py-1 text-[10px] font-black text-orange-500">
+                                                                {slot.discountLabel}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -1288,7 +2029,7 @@ const TicketDetails: React.FC = () => {
 
                                         <div className="space-y-4 mb-8">
                                             <AnimatePresence>
-                                                {selectedSeats.length === 0 ? (
+                                                {selectedSeatDetails.length === 0 ? (
                                                     <motion.div 
                                                         initial={{ opacity: 0 }}
                                                         animate={{ opacity: 1 }}
@@ -1300,23 +2041,51 @@ const TicketDetails: React.FC = () => {
                                                         </p>
                                                     </motion.div>
                                                 ) : (
-                                                    selectedSeatDetails.map(seat => (
-                                                        <motion.div 
-                                                            key={seat.id}
-                                                            initial={{ opacity: 0, x: -20 }}
-                                                            animate={{ opacity: 1, x: 0 }}
-                                                            exit={{ opacity: 0, scale: 0.9 }}
-                                                            className="flex items-center justify-between p-3 bg-gray-50/50 rounded-xl border border-gray-100"
-                                                        >
-                                                            <div className="flex items-center gap-3">
-                                                                <div className="w-8 h-8 rounded-lg bg-white border border-gray-100 flex items-center justify-center text-tet-red font-black text-[10px]">
-                                                                    {seat.seatNumber}
+                                                    selectedSeatDetails.map((seat, index) => {
+                                                        const slot = requiredPassengerSlots[index];
+                                                        const normalizedStatus = normalizeSeatStatus(seat.status);
+                                                        const summaryStatus = isSeatHeldByCurrentBooking(seat, currentBookingId, currentBookingTicketIds)
+                                                            ? 'HOLD'
+                                                            : ['QUEUED', 'PENDING'].includes(normalizedStatus)
+                                                            ? 'QUEUE'
+                                                            : normalizedStatus === 'HOLD'
+                                                                ? 'HOLD'
+                                                                : 'CHON';
+                                                        return (
+                                                            <motion.div
+                                                                key={seat.id}
+                                                                initial={{ opacity: 0, x: -20 }}
+                                                                animate={{ opacity: 1, x: 0 }}
+                                                                exit={{ opacity: 0, scale: 0.9 }}
+                                                                className="flex items-center justify-between p-3 bg-gray-50/50 rounded-xl border border-gray-100"
+                                                            >
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className="w-8 h-8 rounded-lg bg-white border border-gray-100 flex items-center justify-center text-tet-red font-black text-[10px]">
+                                                                        {seat.seatNumber}
+                                                                    </div>
+                                                                    <div>
+                                                                        <span className="text-xs font-bold text-gray-700">{getSeatPlaceLabel(trip, seat)}</span>
+                                                                        <span className={cn(
+                                                                            "ml-2 rounded-full px-2 py-0.5 text-[8px] font-black",
+                                                                            summaryStatus === 'QUEUE'
+                                                                                ? "bg-blue-50 text-blue-600"
+                                                                                : summaryStatus === 'HOLD'
+                                                                                    ? "bg-emerald-50 text-emerald-600"
+                                                                                    : "bg-red-50 text-tet-red"
+                                                                        )}>
+                                                                            {summaryStatus}
+                                                                        </span>
+                                                                        {slot && (
+                                                                            <p className="mt-0.5 text-[10px] font-bold text-gray-400">
+                                                                                {slot.label}
+                                                                            </p>
+                                                                        )}
+                                                                    </div>
                                                                 </div>
-                                                                <span className="text-xs font-bold text-gray-700">Ghế {seat.seatNumber}</span>
-                                                            </div>
-                                                            <span className="text-xs font-black text-gray-900">{formatPrice(seatUnitPrice ?? seat.price ?? 0)}</span>
-                                                        </motion.div>
-                                                    ))
+                                                                <span className="text-xs font-black text-gray-900">{formatPrice(passengerSeatPrices[index] ?? seat.price ?? 0)}</span>
+                                                            </motion.div>
+                                                        );
+                                                    })
                                                 )}
                                             </AnimatePresence>
                                         </div>
@@ -1346,8 +2115,20 @@ const TicketDetails: React.FC = () => {
                                             </div>
                                         </div>
 
+                                        {!isSeatSelectionComplete && (
+                                            <div className="mb-4 rounded-2xl border border-orange-100 bg-orange-50 px-4 py-3 text-center text-xs font-black text-orange-600">
+                                                Vui lòng chọn đủ {requiredSeatCount} ghế cho {requiredSeatCount} hành khách.
+                                            </div>
+                                        )}
+
+                                        {childSeatValidationMessage && childSeatValidationMessage !== loginError && (
+                                            <div className="mb-4 rounded-2xl border border-orange-100 bg-orange-50 px-4 py-3 text-center text-xs font-black text-orange-600">
+                                                {childSeatValidationMessage}
+                                            </div>
+                                        )}
+
                                         <button 
-                                            disabled={selectedSeats.length === 0 || isSubmitting}
+                                            disabled={!canContinueSeatSelection || isSubmitting}
                                             onClick={handleCreateBooking}
                                             className="w-full bg-tet-red hover:bg-red-700 text-white py-5 rounded-2xl font-black uppercase text-xs tracking-[0.2em] shadow-xl shadow-tet-red/20 transition-all flex items-center justify-center gap-3 disabled:opacity-30 group"
                                         >
@@ -1372,183 +2153,242 @@ const TicketDetails: React.FC = () => {
                     )}
 
                     {step === 2 && (
-                        <motion.div 
-                            key="step2" 
+                        <motion.div
+                            key="step2"
                             initial={{ opacity: 0, scale: 0.98 }}
                             animate={{ opacity: 1, scale: 1 }}
-                            className="max-w-4xl mx-auto space-y-6"
+                            className="mx-auto grid max-w-6xl grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_380px]"
                         >
-                            <div className="text-center space-y-2">
-                                <h3 className="text-3xl font-black text-gray-900 tracking-tight">{t('ticket_details.passengers.title')}</h3>
-                                <p className="text-gray-500 font-medium">Nhập thông tin người đặt một lần, sau đó gán nhanh cho hành khách nếu người đặt cũng đi tàu.</p>
-                            </div>
-
-                            <div className="bg-white p-6 md:p-8 rounded-3xl border border-gray-100 shadow-sm">
-                                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between mb-6">
-                                    <div className="flex items-center gap-4">
-                                        <div className="w-11 h-11 rounded-xl bg-red-50 text-tet-red flex items-center justify-center">
-                                            <User size={20} />
-                                        </div>
-                                        <div>
-                                            <h4 className="text-base font-black text-gray-900">Thông tin người đặt</h4>
-                                            <p className="text-xs font-bold text-gray-400">Dùng để liên hệ và có thể sao chép cho ghế người đặt sử dụng.</p>
-                                        </div>
-                                    </div>
-                                    <span className="rounded-full bg-gray-50 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-gray-400">
-                                        Nhập một lần
-                                    </span>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Họ và tên người đặt</label>
-                                        <div className="relative">
-                                            <User size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
-                                            <input
-                                                type="text"
-                                                placeholder="Ví dụ: Nguyễn Văn A"
-                                                className="w-full pl-11 pr-4 py-4 bg-gray-50/50 rounded-xl border border-gray-100 focus:bg-white focus:border-tet-red focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm"
-                                                value={bookingContact.name}
-                                                onChange={e => updateBookingContact('name', e.target.value)}
-                                            />
-                                        </div>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Số điện thoại</label>
-                                        <div className="relative">
-                                            <Phone size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
+                            <div className="space-y-5">
+                                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm md:p-6">
+                                    <h3 className="text-2xl font-semibold text-[#003b70]">Thông tin liên hệ</h3>
+                                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                                        <div className="space-y-2">
+                                            <label className="text-sm font-semibold text-gray-700">
+                                                Số điện thoại <span className="text-tet-red">*</span>
+                                            </label>
                                             <input
                                                 type="tel"
-                                                placeholder="Số điện thoại liên hệ"
-                                                className="w-full pl-11 pr-4 py-4 bg-gray-50/50 rounded-xl border border-gray-100 focus:bg-white focus:border-tet-red focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm"
+                                                placeholder="Nhập số điện thoại để liên lạc"
+                                                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold outline-none transition-all focus:border-tet-red focus:ring-4 focus:ring-red-50"
                                                 value={bookingContact.phone}
                                                 onChange={e => updateBookingContact('phone', e.target.value)}
                                             />
                                         </div>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Email</label>
-                                        <div className="relative">
-                                            <Mail size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
+                                        <div className="space-y-2">
+                                            <label className="text-sm font-semibold text-gray-700">
+                                                Email <span className="text-tet-red">*</span>
+                                            </label>
                                             <input
                                                 type="email"
-                                                placeholder="Email nhận thông báo"
-                                                className="w-full pl-11 pr-4 py-4 bg-gray-50/50 rounded-xl border border-gray-100 focus:bg-white focus:border-tet-red focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm"
+                                                placeholder="Nhập email để nhận vé điện tử"
+                                                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold outline-none transition-all focus:border-tet-red focus:ring-4 focus:ring-red-50"
                                                 value={bookingContact.email}
                                                 onChange={e => updateBookingContact('email', e.target.value)}
                                             />
                                         </div>
                                     </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">CCCD người đặt</label>
-                                        <div className="relative">
-                                            <IdCard size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                pattern="\d{12}"
-                                                maxLength={CCCD_LENGTH}
-                                                placeholder="Nhập nếu người đặt đi tàu"
-                                                className={cn(
-                                                    "w-full pl-11 pr-4 py-4 bg-gray-50/50 rounded-xl border focus:bg-white focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm",
-                                                    bookingContact.idCard && !isValidCccd(bookingContact.idCard) ? "border-tet-red" : "border-gray-100 focus:border-tet-red"
-                                                )}
-                                                value={bookingContact.idCard}
-                                                onChange={e => updateBookingContact('idCard', e.target.value)}
-                                            />
-                                        </div>
-                                        {bookingContact.idCard && !isValidCccd(bookingContact.idCard) && (
-                                            <p className="text-[11px] font-bold text-tet-red px-1">CCCD phải gồm đúng 12 chữ số.</p>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
+                                    <label className="mt-5 flex items-center gap-3 text-sm font-semibold text-gray-700">
+                                        <input type="checkbox" className="h-4 w-4 rounded border-gray-300 text-tet-red focus:ring-tet-red" />
+                                        Xuất hóa đơn điện tử
+                                    </label>
+                                </section>
 
-                            <div className="space-y-4">
-                                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                                    <div>
-                                        <h4 className="text-base font-black text-gray-900">Hành khách theo ghế</h4>
-                                        <p className="text-xs font-bold text-gray-400">Mỗi vé cần đúng tên và CCCD của người sử dụng ghế.</p>
+                                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm md:p-6">
+                                    <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                        <div>
+                                            <h3 className="text-2xl font-semibold text-[#003b70]">Thông tin hành khách</h3>
+                                            <p className="mt-1 text-sm font-semibold text-gray-500">
+                                                {passengers.filter(passenger => isPassengerValid(passenger)).length}/{passengers.length} hành khách đã nhập đủ.
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="inline-flex items-center gap-2 self-start rounded-xl border border-cyan-300 px-4 py-2 text-sm font-bold text-cyan-600 transition-all hover:bg-cyan-50"
+                                        >
+                                            <Info size={16} />
+                                            Nhập dạng bảng
+                                        </button>
                                     </div>
-                                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">
-                                        {passengers.filter(passenger => isPassengerValid(passenger)).length}/{passengers.length} đã đủ
-                                    </span>
-                                </div>
-                                {passengers.map((p, i) => (
-                                    <motion.div 
-                                        key={p.ticketId} 
-                                        initial={{ opacity: 0, x: -20, delay: i * 0.1 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        onFocusCapture={() => setActivePassengerIndex(i)}
-                                        className={cn(
-                                            "bg-white p-5 md:p-6 rounded-3xl border shadow-sm relative overflow-hidden transition-all",
-                                            activePassengerIndex === i ? "border-red-100 ring-4 ring-red-50" : "border-gray-100"
-                                        )}
+
+                                    <div className="space-y-6">
+                                        {passengers.map((p, i) => {
+                                            const slot = requiredPassengerSlots[i];
+                                            const seat = selectedSeatDetails[i];
+                                            const carriage = findSeatCarriage(trip, seat?.id);
+                                            const passengerLabel = slot?.label || `Hành khách ${i + 1}`;
+                                            const passengerSubLabel = slot ? (passengerTypeMeta[slot.type]?.description || PASSENGER_TYPE_SUB_LABELS[slot.type]) : '';
+                                            const seatPlace = getSeatPlaceLabel(trip, seat) || `Ghế ${p.ticketId}`;
+                                            const carriageTypeName = formatCarriageTypeName(carriage?.carriageTypeName) || 'Hạng ghế';
+                                            const passengerSeatPrice = passengerSeatPrices[i] ?? seat?.price ?? 0;
+
+                                            return (
+                                                <motion.div
+                                                    key={p.ticketId}
+                                                    initial={{ opacity: 0, x: -16, delay: i * 0.05 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    onFocusCapture={() => setActivePassengerIndex(i)}
+                                                    className="space-y-3"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <h4 className="text-lg font-bold text-gray-900">
+                                                            {passengerLabel}
+                                                            {passengerSubLabel && <span className="ml-1 font-semibold text-gray-700">({passengerSubLabel})</span>}
+                                                        </h4>
+                                                        {isPassengerValid(p) && <CheckCircle2 size={18} className="text-emerald-500" />}
+                                                    </div>
+
+                                                    <div className="inline-grid min-w-[300px] grid-cols-[1fr_1fr_auto] overflow-hidden rounded-xl bg-slate-100 text-sm font-semibold text-gray-700">
+                                                        <div className="px-4 py-2">
+                                                            <p className="text-gray-500">Chiều đi</p>
+                                                            <p className="mt-1 text-gray-900">{seatPlace}</p>
+                                                        </div>
+                                                        <div className="px-4 py-2">
+                                                            <p className="text-gray-500">{carriageTypeName}</p>
+                                                            <p className="mt-1 text-gray-900">{formatCarriageNumberLabel(carriage?.carriageNumber)}</p>
+                                                        </div>
+                                                        <div className="px-4 py-2 text-right">
+                                                            <p className="text-gray-500">Giá vé</p>
+                                                            <p className="mt-1 text-gray-900">{formatPrice(passengerSeatPrice)}</p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)_minmax(0,1fr)]">
+                                                        <div className="space-y-2">
+                                                            <label className="text-sm font-semibold text-gray-700">
+                                                                Họ và tên <span className="text-tet-red">*</span>
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                placeholder="Vd: Nguyễn Văn Nam"
+                                                                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold outline-none transition-all focus:border-tet-red focus:ring-4 focus:ring-red-50"
+                                                                value={p.name}
+                                                                onChange={e => updatePassenger(i, 'name', e.target.value)}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-2">
+                                                            <label className="text-sm font-semibold text-gray-700">
+                                                                Ngày sinh <span className="text-tet-red">*</span>
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                placeholder="dd/mm/yyyy"
+                                                                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold outline-none transition-all focus:border-tet-red focus:ring-4 focus:ring-red-50"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-2">
+                                                            <label className="text-sm font-semibold text-gray-700">CCCD / Passport</label>
+                                                            <input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                pattern="\d{12}"
+                                                                maxLength={CCCD_LENGTH}
+                                                                placeholder="Nhập CCCD hoặc Passport"
+                                                                className={cn(
+                                                                    "w-full rounded-xl border bg-white px-4 py-3 text-sm font-semibold outline-none transition-all focus:ring-4 focus:ring-red-50",
+                                                                    p.idCard && !isValidCccd(p.idCard) ? "border-tet-red" : "border-gray-200 focus:border-tet-red"
+                                                                )}
+                                                                value={p.idCard}
+                                                                onChange={e => updatePassenger(i, 'idCard', e.target.value)}
+                                                            />
+                                                            {p.idCard && !isValidCccd(p.idCard) && (
+                                                                <p className="text-[11px] font-bold text-tet-red">CCCD phải gồm đúng 12 chữ số.</p>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </motion.div>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+
+                                {loginError && (
+                                    <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm font-bold text-tet-red">
+                                        {loginError}
+                                    </div>
+                                )}
+
+                                {passengerInfoExpired && (
+                                    <div className="rounded-2xl border border-orange-100 bg-orange-50 px-4 py-3 text-sm font-bold text-orange-600">
+                                        Hết thời gian nhập thông tin. Vui lòng quay lại chọn ghế để giữ chỗ lại.
+                                    </div>
+                                )}
+
+                                <div className="flex flex-col gap-3 sm:flex-row">
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep(1)}
+                                        className="inline-flex min-h-[54px] flex-1 items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-6 text-base font-bold text-gray-700 transition-all hover:border-tet-red hover:text-tet-red"
                                     >
-                                        <div className="absolute top-0 left-0 w-1.5 h-full bg-tet-red" />
-                                        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-6">
-                                            <div className="flex items-center gap-4">
-                                            <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center text-tet-red font-black">
-                                                {isPassengerValid(p) ? <CheckCircle2 size={20} /> : i + 1}
-                                            </div>
-                                            <div>
-                                                <h4 className="text-sm font-black text-gray-900">Thông tin hành khách</h4>
-                                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Ghế {p.ticketId}</p>
-                                            </div>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => applyContactToPassenger(i)}
-                                                disabled={!bookingContact.name && !bookingContact.idCard}
-                                                className="inline-flex items-center gap-2 self-start rounded-full bg-red-50 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-tet-red transition-all hover:bg-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
-                                            >
-                                                <Copy size={13} />
-                                                Dùng thông tin người đặt
-                                            </button>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                            <div className="space-y-2">
-                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Họ và tên</label>
-                                                <input 
-                                                    type="text" 
-                                                    placeholder="Ví dụ: Nguyễn Văn A" 
-                                                    className="w-full px-5 py-4 bg-gray-50/50 rounded-xl border border-gray-100 focus:bg-white focus:border-tet-red focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm"
-                                                    value={p.name}
-                                                    onChange={e => updatePassenger(i, 'name', e.target.value)}
-                                                />
-                                            </div>
-                                            <div className="space-y-2">
-                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Số CCCD</label>
-                                                <input 
-                                                    type="text" 
-                                                    inputMode="numeric"
-                                                    pattern="\d{12}"
-                                                    maxLength={CCCD_LENGTH}
-                                                    placeholder="Nhập 12 số CCCD" 
-                                                    className={cn(
-                                                        "w-full px-5 py-4 bg-gray-50/50 rounded-xl border focus:bg-white focus:ring-4 focus:ring-tet-red/5 outline-none transition-all font-bold text-sm",
-                                                        p.idCard && !isValidCccd(p.idCard) ? "border-tet-red" : "border-gray-100 focus:border-tet-red"
-                                                    )}
-                                                    value={p.idCard}
-                                                    onChange={e => updatePassenger(i, 'idCard', e.target.value)}
-                                                />
-                                                {p.idCard && !isValidCccd(p.idCard) && (
-                                                    <p className="text-[11px] font-bold text-tet-red px-1">CCCD phải gồm đúng 12 chữ số.</p>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </motion.div>
-                                ))}
+                                        <ChevronLeft size={20} />
+                                        Quay lại
+                                    </button>
+                                    <button
+                                        onClick={handleUpdatePassengers}
+                                        disabled={isSubmitting || passengerInfoExpired || !isContactInfoValid || !arePassengersValid(passengers)}
+                                        className="inline-flex min-h-[54px] flex-[1.6] items-center justify-center gap-3 rounded-xl bg-[#ff8800] px-6 text-base font-black text-white shadow-lg shadow-orange-200 transition-all hover:bg-[#f07b00] disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        {isSubmitting ? <Train className="animate-spin" /> : `Thanh toán (${passengerInfoCountdown})`}
+                                        {!isSubmitting && <ChevronRight size={20} />}
+                                    </button>
+                                </div>
                             </div>
 
-                            <button 
-                                onClick={handleUpdatePassengers}
-                                disabled={isSubmitting || !arePassengersValid(passengers)}
-                                className="w-full bg-tet-red text-white py-6 rounded-2xl font-black uppercase text-sm tracking-[0.2em] shadow-2xl shadow-tet-red/30 transition-all flex items-center justify-center gap-3 disabled:opacity-30"
-                            >
-                                {isSubmitting ? <Train className="animate-spin" /> : 'Xác nhận thông tin hành khách'}
-                            </button>
+                            <aside className="space-y-4 lg:sticky lg:top-[170px] lg:self-start">
+                                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div>
+                                            <p className="text-lg font-bold text-gray-900">
+                                                {departureStationLabel} <span className="mx-2 text-gray-400">→</span> {arrivalStationLabel}
+                                            </p>
+                                        </div>
+                                        <span className="text-lg font-black text-gray-900">{trip.trainCode}</span>
+                                    </div>
+
+                                    <div className="mt-5 grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-gray-200 pb-5">
+                                        <div>
+                                            <p className="text-2xl font-black text-gray-900">{formatTime(trip.departureTime)}</p>
+                                            <p className="mt-1 text-sm font-semibold text-gray-600">{formatTravelDateShort(trip.departureTime)}</p>
+                                        </div>
+                                        <Train size={22} className="text-gray-400" />
+                                        <div className="text-right">
+                                            <p className="text-2xl font-black text-gray-900">{formatTime(trip.arrivalTime || trip.departureTime)}</p>
+                                            <p className="mt-1 text-sm font-semibold text-gray-600">{formatTravelDateShort(trip.arrivalTime || trip.departureTime)}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-5 space-y-3 text-sm font-semibold">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-gray-700">Tổng tiền vé</span>
+                                            <span className="text-gray-900">{formatPrice(originalPrice)}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-gray-700">Phí dịch vụ</span>
+                                            <span className="text-gray-900">{formatPrice(serviceFee)}</span>
+                                        </div>
+                                        {discountAmount > 0 && (
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-tet-red">Khuyến mãi</span>
+                                                <span className="text-tet-red">-{formatPrice(discountAmount)}</span>
+                                            </div>
+                                        )}
+                                        <div className="flex items-center justify-between border-t border-gray-200 pt-4">
+                                            <span className="font-black text-gray-900">Tổng tiền</span>
+                                            <span className="text-2xl font-black text-[#ff8800]">{formatPrice(passengerInfoTotal)}</span>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                                    <p className="text-base font-semibold text-gray-900">Bước tiếp theo:</p>
+                                    <ul className="mt-2 list-disc space-y-2 pl-5 text-sm font-medium leading-relaxed text-gray-700">
+                                        <li>Vé điện tử sẽ gửi qua email và điện thoại sau khi thanh toán.</li>
+                                        <li>Thanh toán qua mã QR, chuyển khoản, thẻ nội địa/quốc tế hoặc MoMo.</li>
+                                        <li>Hỗ trợ: Gọi <span className="font-black">1900 2087</span>.</li>
+                                    </ul>
+                                </section>
+                            </aside>
                         </motion.div>
                     )}
 
@@ -1632,7 +2472,7 @@ const TicketDetails: React.FC = () => {
                                     <div className="sm:text-right">
                                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Số vé</p>
                                         <h4 className="text-xl font-black text-gray-900">
-                                            {selectedSeats.length} vé
+                                            {processSeatIds.length} vé
                                         </h4>
                                     </div>
                                 </div>

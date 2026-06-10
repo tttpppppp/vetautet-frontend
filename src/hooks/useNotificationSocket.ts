@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Client } from '@stomp/stompjs';
 import { UserNotification } from '../types/api.types';
+import { WS_BASE_URL } from '../config/endpoints';
 
 export const useNotificationSocket = (
     userId: number | undefined,
@@ -15,7 +16,7 @@ export const useNotificationSocket = (
     useEffect(() => {
         if (!userId) return;
 
-        const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080/api/v1/ws';
+        const wsUrl = WS_BASE_URL;
         const token = localStorage.getItem('accessToken');
 
         const client = new Client({

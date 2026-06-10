@@ -58,8 +58,8 @@ function App() {
               <Route path="/explore" element={<Explore />} />
               <Route path="/orders" element={<Orders />} />
               <Route path="/profile" element={<Profile />} />
-              <Route path="/search" element={<SearchResults />} />
-              <Route path="/schedules" element={<Schedules />} />
+              <Route path="/search" element={<Schedules />} />
+              <Route path="/schedules" element={<SearchResults />} />
               <Route path="/promotions" element={<Promotions />} />
               <Route path="/payment/momo-return" element={<PaymentReturn provider="momo" />} />
               <Route path="/payment/vnpay-return" element={<PaymentReturn provider="vnpay" />} />
