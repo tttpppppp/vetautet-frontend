@@ -1,4 +1,4 @@
-const PRODUCTION_API_URL = 'https://vetautet-backend.onrender.com/api/v1';
+const PRODUCTION_API_URL = 'https://vetautet-backend-1.onrender.com/api/v1';
 const DEVELOPMENT_API_URL = 'http://localhost:8080/api/v1';
 
 const normalizeUrl = (url: string) => url.replace(/\/+$/, '');
